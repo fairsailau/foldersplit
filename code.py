@@ -100,60 +100,57 @@ class FolderSplitRecommender:
             st.write(f"Processing recommendations for user: {user_email}")
             st.write(f"Total file count (from level 1 folders): {total_file_count:,}")
             
-            # Get all folders owned by this user
-            user_folders = self.df[self.df['Owner'] == user_email].copy()
+            # Target amount to keep with original user
+            target_to_keep = min(self.file_threshold, total_file_count)
+            
+            # Get only level 1 folders owned by this user
+            level1_folders = self.df[(self.df['Owner'] == user_email) & (self.df['Level'] == 1)].copy()
+            
+            # Sort by file count (ascending) to prioritize keeping smaller folders with user
+            level1_folders = level1_folders.sort_values('File Count')
             
             # Initialize recommendations for this user
             recommendations = {
                 'user_email': user_email,
                 'total_file_count': int(total_file_count),
-                'excess_files': int(total_file_count - self.file_threshold),
+                'excess_files': int(total_file_count - target_to_keep),
                 'recommended_splits': [],
                 'service_accounts': {},  # Track service accounts for this user
-                'level_assignments': {}  # Track assignments by level
+                'folders_to_keep': [],   # Track folders to keep with user
+                'level_assignments': {}  # Track folder assignments by level
             }
             
-            # Start with the target amount to keep with the original user
-            target_to_keep = min(self.file_threshold, total_file_count)
+            # First, identify folders to keep with original user
             kept_files = 0
+            folders_to_keep = []
             
-            # Process levels sequentially to find folders to move
-            max_level = user_folders['Level'].max()
-            
-            # Track folders to move by level
-            folders_to_move = []
-            
-            # Collect ALL potential folders to move from all levels
-            for level in range(1, int(max_level) + 1):
-                level_folders = user_folders[user_folders['Level'] == level]
-                if len(level_folders) == 0:
+            # Try to keep smaller folders first (up to threshold)
+            for _, folder in level1_folders.iterrows():
+                folder_file_count = folder['File Count']
+                
+                # If adding this folder would put us over threshold, skip it
+                if kept_files + folder_file_count > target_to_keep:
                     continue
                 
-                st.write(f"Examining folders at level {level}...")
+                # Otherwise, keep this folder with original user
+                folders_to_keep.append(folder['Path'])
+                kept_files += folder_file_count
                 
-                # Sort folders by file count (ascending) - we prefer to move larger folders first
-                level_folders = level_folders.sort_values('File Count', ascending=False)
-                
-                # Add folders from this level to our candidates list
-                for _, folder in level_folders.iterrows():
-                    # Convert to a dict for easier manipulation
-                    folder_dict = folder.to_dict()
-                    folder_dict['level'] = int(folder_dict['Level'])
-                    folder_dict['current_file_count'] = int(folder_dict['File Count'])
-                    folder_dict['direct_file_count'] = int(folder_dict['direct_file_count'])
-                    
-                    # Add to candidates
-                    folders_to_move.append(folder_dict)
-                
-                # If we already have more than enough folders to reach our target, we can stop
-                if kept_files + sum([f['current_file_count'] for f in folders_to_move]) >= total_file_count - target_to_keep:
-                    break
+                recommendations['folders_to_keep'].append({
+                    'folder_path': folder['Path'],
+                    'folder_name': folder['Folder Name'],
+                    'file_count': int(folder_file_count)
+                })
             
-            # Now sort all folders by level and then by file count (descending)
-            folders_to_move.sort(key=lambda x: (x['level'], -x['current_file_count']))
+            # Calculate files to move to service accounts
+            files_to_move = total_file_count - kept_files
             
-            # Track what remains with the original user after moving folders
-            remaining_with_user = total_file_count
+            st.write(f"Files kept with original user: {kept_files:,}")
+            st.write(f"Files to move to service accounts: {files_to_move:,}")
+            
+            # Get folders that need to be moved (not kept with original user)
+            folders_to_move = level1_folders[~level1_folders['Path'].isin(folders_to_keep)]
+            folders_to_move = folders_to_move.sort_values('File Count', ascending=False)
             
             # Initialize service account tracking
             current_service_account = 1
@@ -161,133 +158,14 @@ class FolderSplitRecommender:
             current_service_account_files = 0
             recommendations['service_accounts'][service_account_name] = 0
             
-            # Keep moving folders until we get below the threshold
-            for folder in folders_to_move:
+            # Assign folders to service accounts
+            for _, folder in folders_to_move.iterrows():
                 folder_path = folder['Path']
-                folder_file_count = folder['current_file_count']
+                folder_file_count = folder['File Count']
                 
-                # If moving this entire folder would put us below target, we need a partial split
-                if remaining_with_user - folder_file_count < target_to_keep:
-                    # Calculate how many files to move from this folder
-                    files_to_move = remaining_with_user - target_to_keep
-                    
-                    # If there's anything to move
-                    if files_to_move > 0:
-                        # Check if current service account can fit these files
-                        if current_service_account_files + files_to_move > self.file_threshold:
-                            # Create a new service account
-                            current_service_account += 1
-                            service_account_name = f"service_account_{current_service_account}"
-                            current_service_account_files = 0
-                            recommendations['service_accounts'][service_account_name] = 0
-                        
-                        # Add this partial folder to service account
-                        recommendations['service_accounts'][service_account_name] += files_to_move
-                        current_service_account_files += files_to_move
-                        
-                        # Add to recommended splits
-                        recommendations['recommended_splits'].append({
-                            'folder_path': folder['Path'],
-                            'folder_name': folder['Folder Name'],
-                            'folder_id': folder['Folder ID'],
-                            'level': folder['level'],
-                            'current_file_count': folder_file_count,
-                            'direct_file_count': folder['direct_file_count'],
-                            'recommended_files_to_move': files_to_move,
-                            'new_owner': service_account_name,
-                            'is_partial_split': True
-                        })
-                        
-                        # Add to level assignments
-                        level = folder['level']
-                        if level not in recommendations['level_assignments']:
-                            recommendations['level_assignments'][level] = []
-                        
-                        recommendations['level_assignments'][level].append({
-                            'folder_path': folder['Path'],
-                            'files_to_move': files_to_move,
-                            'new_owner': service_account_name,
-                            'is_partial_split': True
-                        })
-                        
-                        st.write(f"Partial split of folder: {folder_path} ({files_to_move:,} of {folder_file_count:,} files) to {service_account_name}")
-                        
-                        # Update remaining files
-                        remaining_with_user = target_to_keep
-                    
-                    # We're at target, no need to continue
-                    break
-                
-                # If the folder is very large, split across multiple service accounts
-                if folder_file_count > self.file_threshold:
-                    st.write(f"Splitting large folder: {folder_path} ({folder_file_count:,} files) across multiple service accounts")
-                    
-                    # Initialize how many files remain to be moved from this folder
-                    remaining_folder_files = folder_file_count
-                    
-                    while remaining_folder_files > 0:
-                        # Calculate how many files can fit in current service account
-                        space_available = self.file_threshold - current_service_account_files
-                        
-                        # How many files to put in this account
-                        files_for_this_account = min(space_available, remaining_folder_files)
-                        
-                        # If no space is available, create new account
-                        if files_for_this_account == 0:
-                            current_service_account += 1
-                            service_account_name = f"service_account_{current_service_account}"
-                            current_service_account_files = 0
-                            recommendations['service_accounts'][service_account_name] = 0
-                            
-                            # Recalculate space
-                            space_available = self.file_threshold
-                            files_for_this_account = min(space_available, remaining_folder_files)
-                        
-                        # Add to service account
-                        recommendations['service_accounts'][service_account_name] += files_for_this_account
-                        current_service_account_files += files_for_this_account
-                        
-                        # Add to recommended splits
-                        recommendations['recommended_splits'].append({
-                            'folder_path': folder['Path'],
-                            'folder_name': folder['Folder Name'],
-                            'folder_id': folder['Folder ID'],
-                            'level': folder['level'],
-                            'current_file_count': folder_file_count,
-                            'direct_file_count': folder['direct_file_count'],
-                            'recommended_files_to_move': files_for_this_account,
-                            'new_owner': service_account_name,
-                            'is_partial_split': True if remaining_folder_files > files_for_this_account else False
-                        })
-                        
-                        # Add to level assignments
-                        level = folder['level']
-                        if level not in recommendations['level_assignments']:
-                            recommendations['level_assignments'][level] = []
-                        
-                        recommendations['level_assignments'][level].append({
-                            'folder_path': folder['Path'],
-                            'files_to_move': files_for_this_account,
-                            'new_owner': service_account_name,
-                            'is_partial_split': True if remaining_folder_files > files_for_this_account else False
-                        })
-                        
-                        st.write(f"Assigned {files_for_this_account:,} files to {service_account_name}")
-                        
-                        # Update remaining files
-                        remaining_folder_files -= files_for_this_account
-                        
-                        # If service account is full, prepare for next one
-                        if current_service_account_files >= self.file_threshold:
-                            current_service_account += 1
-                            service_account_name = f"service_account_{current_service_account}"
-                            current_service_account_files = 0
-                            recommendations['service_accounts'][service_account_name] = 0
-                
-                else:
-                    # Handle normal folder that fits in a single service account
-                    
-                    # Check if current service account can accommodate this folder
+                # If this folder fits in a single service account
+                if folder_file_count <= self.file_threshold:
+                    # Check if current service account has enough space
                     if current_service_account_files + folder_file_count > self.file_threshold:
                         # Create a new service account
                         current_service_account += 1
@@ -295,7 +173,7 @@ class FolderSplitRecommender:
                         current_service_account_files = 0
                         recommendations['service_accounts'][service_account_name] = 0
                     
-                    # Add to service account
+                    # Add folder to service account
                     recommendations['service_accounts'][service_account_name] += folder_file_count
                     current_service_account_files += folder_file_count
                     
@@ -303,35 +181,96 @@ class FolderSplitRecommender:
                     recommendations['recommended_splits'].append({
                         'folder_path': folder['Path'],
                         'folder_name': folder['Folder Name'],
-                        'folder_id': folder['Folder ID'],
-                        'level': folder['level'],
-                        'current_file_count': folder_file_count,
-                        'direct_file_count': folder['direct_file_count'],
-                        'recommended_files_to_move': folder_file_count,
+                        'folder_id': int(folder['Folder ID']) if not pd.isna(folder['Folder ID']) else None,
+                        'level': int(folder['Level']),
+                        'current_file_count': int(folder_file_count),
+                        'direct_file_count': int(folder['direct_file_count']),
+                        'recommended_files_to_move': int(folder_file_count),
                         'new_owner': service_account_name,
                         'is_partial_split': False
                     })
                     
                     # Add to level assignments
-                    level = folder['level']
+                    level = int(folder['Level'])
                     if level not in recommendations['level_assignments']:
                         recommendations['level_assignments'][level] = []
                     
                     recommendations['level_assignments'][level].append({
                         'folder_path': folder['Path'],
-                        'files_to_move': folder_file_count,
+                        'folder_name': folder['Folder Name'],
+                        'files_to_move': int(folder_file_count),
                         'new_owner': service_account_name,
                         'is_partial_split': False
                     })
                     
                     st.write(f"Assigned folder: {folder_path} ({folder_file_count:,} files) to {service_account_name}")
                 
-                # Update remaining files with user
-                remaining_with_user -= folder_file_count
-                
-                # If we're at or below target, we can stop
-                if remaining_with_user <= target_to_keep:
-                    break
+                else:
+                    # This folder is too large for a single service account, so split it
+                    st.write(f"Splitting large folder: {folder_path} ({folder_file_count:,} files) across multiple service accounts")
+                    
+                    # Track how many files remain to assign from this folder
+                    remaining_folder_files = folder_file_count
+                    
+                    while remaining_folder_files > 0:
+                        # How much space is available in current service account
+                        space_available = self.file_threshold - current_service_account_files
+                        
+                        # Calculate files to assign to this service account
+                        files_for_this_account = min(space_available, remaining_folder_files)
+                        
+                        # If no space in current account, create a new one
+                        if files_for_this_account == 0:
+                            current_service_account += 1
+                            service_account_name = f"service_account_{current_service_account}"
+                            current_service_account_files = 0
+                            recommendations['service_accounts'][service_account_name] = 0
+                            
+                            # Recalculate space available
+                            space_available = self.file_threshold
+                            files_for_this_account = min(space_available, remaining_folder_files)
+                        
+                        # Add files to this service account
+                        recommendations['service_accounts'][service_account_name] += files_for_this_account
+                        current_service_account_files += files_for_this_account
+                        
+                        # Add to recommended splits
+                        recommendations['recommended_splits'].append({
+                            'folder_path': folder['Path'],
+                            'folder_name': folder['Folder Name'],
+                            'folder_id': int(folder['Folder ID']) if not pd.isna(folder['Folder ID']) else None,
+                            'level': int(folder['Level']),
+                            'current_file_count': int(folder_file_count),
+                            'direct_file_count': int(folder['direct_file_count']),
+                            'recommended_files_to_move': int(files_for_this_account),
+                            'new_owner': service_account_name,
+                            'is_partial_split': True
+                        })
+                        
+                        # Add to level assignments
+                        level = int(folder['Level'])
+                        if level not in recommendations['level_assignments']:
+                            recommendations['level_assignments'][level] = []
+                        
+                        recommendations['level_assignments'][level].append({
+                            'folder_path': folder['Path'],
+                            'folder_name': folder['Folder Name'],
+                            'files_to_move': int(files_for_this_account),
+                            'new_owner': service_account_name,
+                            'is_partial_split': True
+                        })
+                        
+                        st.write(f"Assigned {files_for_this_account:,} files to {service_account_name}")
+                        
+                        # Update remaining files for this folder
+                        remaining_folder_files -= files_for_this_account
+                        
+                        # If current service account is full, prepare to create a new one
+                        if current_service_account_files >= self.file_threshold:
+                            current_service_account += 1
+                            service_account_name = f"service_account_{current_service_account}"
+                            current_service_account_files = 0
+                            recommendations['service_accounts'][service_account_name] = 0
             
             # Remove any empty service accounts
             empty_accounts = [sa for sa, count in recommendations['service_accounts'].items() if count == 0]
@@ -829,7 +768,7 @@ def main():
                                         st.pyplot(user_viz['current_vs_recommended'])
                                     
                                     # Display level-based recommendations
-                                    if user_recs['level_assignments']:
+                                    if 'level_assignments' in user_recs and user_recs['level_assignments']:
                                         st.write("### Level-Based Folder Prioritization")
                                         
                                         for level, assignments in sorted(user_recs['level_assignments'].items()):
@@ -839,6 +778,7 @@ def main():
                                             level_df = pd.DataFrame(assignments)
                                             level_df = level_df.rename(columns={
                                                 'folder_path': 'Folder Path',
+                                                'folder_name': 'Folder Name',
                                                 'files_to_move': 'Files to Move',
                                                 'new_owner': 'New Owner',
                                                 'is_partial_split': 'Partial Split'
