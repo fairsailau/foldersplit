@@ -186,10 +186,10 @@ class FolderSplitRecommender:
                     st.write(f"  Assigned folder: {folder_path} ({folder_file_count:,} files) to {service_account_name}")
                 else:
                     # This folder needs to be split across multiple service accounts
-                    partial_splits.append(folder)
+                    partial_splits.append(folder.to_dict())  # Convert Series to dict
             
             # Handle folders that need to be split across multiple service accounts
-            for _, folder in partial_splits.iterrows():
+            for folder in partial_splits:  # Changed from partial_splits.iterrows() to iterate directly over the list
                 folder_path = folder['Path']
                 folder_file_count = folder['File Count']
                 
