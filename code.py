@@ -110,18 +110,14 @@ class FolderSplitRecommender:
                 'total_file_count': int(total_file_count),
                 'excess_files': int(excess_files),
                 'recommended_splits': [],
-                'service_accounts': {},  # Track service accounts for this user
-                'folders_to_move': []    # Track which folders to move
+                'service_accounts': {}  # Track service accounts for this user
             }
             
             # Get the maximum folder level for this user
             max_level = user_folders['Level'].max()
             
-            # Track folders that have been processed
-            processed_folders = set()
-            
-            # Track folders to move
-            folders_to_move = []
+            # Track remaining files to be split
+            remaining_files = total_file_count
             
             # Initialize service account tracking
             current_service_account = 1
@@ -133,6 +129,11 @@ class FolderSplitRecommender:
             for level in range(1, int(max_level) + 1):
                 st.write(f"Processing level {level} folders...")
                 
+                # If we've already reduced below threshold, break
+                if remaining_files <= self.file_threshold:
+                    st.write(f"Already below threshold after level {level-1}, stopping")
+                    break
+                
                 # Get folders at this level
                 level_folders = user_folders[user_folders['Level'] == level].copy()
                 
@@ -142,12 +143,6 @@ class FolderSplitRecommender:
                 # Find suitable candidates at this level
                 candidates = []
                 for _, folder in level_folders.iterrows():
-                    folder_path = folder['Path']
-                    
-                    # Skip folders that have already been processed
-                    if folder_path in processed_folders:
-                        continue
-                    
                     folder_file_count = folder['File Count']
                     
                     # Skip folders that are too small to be worth splitting
@@ -156,13 +151,18 @@ class FolderSplitRecommender:
                     
                     # Check if this folder is a good candidate (≤ threshold files)
                     if folder_file_count <= self.file_threshold:
+                        # Calculate how much this split would reduce the total
+                        new_total = remaining_files - folder_file_count
+                        
+                        # Add to candidates if it helps reduce the total
                         candidates.append({
                             'folder_path': folder['Path'],
                             'folder_name': folder['Folder Name'],
                             'folder_id': int(folder['Folder ID']) if not pd.isna(folder['Folder ID']) else None,
                             'level': int(folder['Level']),
                             'current_file_count': int(folder['File Count']),
-                            'direct_file_count': int(folder['direct_file_count'])
+                            'direct_file_count': int(folder['direct_file_count']),
+                            'new_total': new_total
                         })
                 
                 # If we found candidates at this level, add them to recommendations
@@ -172,55 +172,78 @@ class FolderSplitRecommender:
                     # Sort candidates by file count (descending) to prioritize larger folders
                     candidates.sort(key=lambda x: x['current_file_count'], reverse=True)
                     
-                    # Add candidates to folders_to_move until we're below threshold
+                    # Add candidates to recommendations until we're below threshold or no more candidates
                     for candidate in candidates:
-                        folder_path = candidate['folder_path']
+                        # Skip if we're already below threshold
+                        if remaining_files <= self.file_threshold:
+                            break
+                        
                         folder_file_count = candidate['current_file_count']
                         
-                        # Mark this folder as processed
-                        processed_folders.add(folder_path)
+                        # Check if current service account can accommodate this folder
+                        if current_service_account_files + folder_file_count > self.file_threshold:
+                            # Create a new service account
+                            current_service_account += 1
+                            current_service_account_files = 0
+                            service_account_name = f"service_account_{current_service_account}"
+                            recommendations['service_accounts'][service_account_name] = 0
                         
-                        # Add to folders to move
-                        folders_to_move.append(candidate)
-            
-            # Calculate total files in selected folders
-            total_files_to_move = sum([folder['current_file_count'] for folder in folders_to_move])
-            
-            # Sort folders by size (largest first)
-            folders_to_move.sort(key=lambda x: x['current_file_count'], reverse=True)
-            
-            # Calculate remaining files after moving all selected folders
-            remaining_files = total_file_count - total_files_to_move
-            
-            # If we've reduced below threshold, we might not need to use all folders
-            # Otherwise, we'll need to consider a partial split
-            if remaining_files <= self.file_threshold:
-                # We've identified enough complete folders to move
-                st.write(f"Successfully identified folders to move. Remaining files: {remaining_files:,}")
-            else:
-                st.write(f"Still above threshold ({remaining_files:,} > {self.file_threshold:,}), looking for partial splits...")
+                        # Update service account files
+                        recommendations['service_accounts'][service_account_name] += folder_file_count
+                        current_service_account_files += folder_file_count
+                        
+                        # Add this candidate to recommendations
+                        recommendations['recommended_splits'].append({
+                            'folder_path': candidate['folder_path'],
+                            'folder_name': candidate['folder_name'],
+                            'folder_id': candidate['folder_id'],
+                            'level': candidate['level'],
+                            'current_file_count': candidate['current_file_count'],
+                            'direct_file_count': candidate['direct_file_count'],
+                            'recommended_files_to_move': candidate['current_file_count'],
+                            'new_total_after_split': candidate['new_total'],
+                            'new_owner': service_account_name
+                        })
+                        
+                        # Update remaining files
+                        remaining_files = candidate['new_total']
+                        
+                        st.write(f" Added folder: {candidate['folder_path']} to {service_account_name}, new total: {remaining_files:,}")
                 
-                # Find a folder for partial splitting
+                st.write(f"After level {level}, remaining files: {remaining_files:,}")
+            
+            # If we still haven't reached the threshold, look for partial splits
+            if remaining_files > self.file_threshold:
+                st.write("Still above threshold after all levels, looking for partial splits...")
+                
+                # Get all folders sorted by level and then by file count
                 all_folders = user_folders.sort_values(['Level', 'File Count'], ascending=[True, False])
                 
                 for _, folder in all_folders.iterrows():
-                    folder_path = folder['Path']
-                    
-                    # Skip processed folders
-                    if folder_path in processed_folders:
-                        continue
-                    
                     folder_file_count = folder['File Count']
                     
-                    # Skip small folders
+                    # Skip folders that are too small
                     if folder_file_count < 10000:
                         continue
                     
-                    # Calculate how many files to move from this folder
+                    # For larger folders, calculate how many files to move
                     files_to_move = remaining_files - self.file_threshold
                     
+                    # Only recommend if this folder has enough files
                     if files_to_move > 0 and files_to_move < folder_file_count:
-                        partial_folder = {
+                        # Check if current service account can accommodate this folder
+                        if current_service_account_files + files_to_move > self.file_threshold:
+                            # Create a new service account
+                            current_service_account += 1
+                            current_service_account_files = 0
+                            service_account_name = f"service_account_{current_service_account}"
+                            recommendations['service_accounts'][service_account_name] = 0
+                        
+                        # Update service account files
+                        recommendations['service_accounts'][service_account_name] += files_to_move
+                        current_service_account_files += files_to_move
+                        
+                        recommendations['recommended_splits'].append({
                             'folder_path': folder['Path'],
                             'folder_name': folder['Folder Name'],
                             'folder_id': int(folder['Folder ID']) if not pd.isna(folder['Folder ID']) else None,
@@ -228,63 +251,30 @@ class FolderSplitRecommender:
                             'current_file_count': int(folder['File Count']),
                             'direct_file_count': int(folder['direct_file_count']),
                             'recommended_files_to_move': int(files_to_move),
-                            'is_partial_split': True
-                        }
-                        
-                        folders_to_move.append(partial_folder)
-                        processed_folders.add(folder_path)
+                            'new_total_after_split': self.file_threshold,
+                            'is_partial_split': True,
+                            'new_owner': service_account_name
+                        })
                         
                         # Update remaining files
                         remaining_files = self.file_threshold
-                        st.write(f"Added partial split of folder: {folder['Path']}, new total: {remaining_files:,}")
+                        
+                        st.write(f"Added partial split of folder: {folder['Path']} to {service_account_name}, new total: {remaining_files:,}")
                         break
             
-            # Now assign folders to service accounts
-            for folder in folders_to_move:
-                folder_file_count = folder.get('recommended_files_to_move', folder['current_file_count'])
-                
-                # Check if current service account can accommodate this folder
-                if current_service_account_files + folder_file_count > self.file_threshold:
-                    # Create a new service account
-                    current_service_account += 1
-                    current_service_account_files = 0
-                    service_account_name = f"service_account_{current_service_account}"
-                    recommendations['service_accounts'][service_account_name] = 0
-                
-                # Update service account files
-                recommendations['service_accounts'][service_account_name] += folder_file_count
-                current_service_account_files += folder_file_count
-                
-                # Add to recommended splits
-                split_info = folder.copy()
-                split_info['recommended_files_to_move'] = folder.get('recommended_files_to_move', folder['current_file_count'])
-                split_info['new_owner'] = service_account_name
-                split_info['new_total_after_split'] = total_file_count - sum([
-                    s.get('recommended_files_to_move', s['current_file_count']) 
-                    for s in recommendations['recommended_splits'] + [split_info]
-                ])
-                
-                recommendations['recommended_splits'].append(split_info)
-                
-                st.write(f"Assigned {folder['folder_path']} to {service_account_name}, files: {folder_file_count:,}")
-            
-            # Calculate final file counts
-            total_files_moved = sum([rec.get('recommended_files_to_move', rec['current_file_count']) 
-                                   for rec in recommendations['recommended_splits']])
-            
-            # Correctly set final file count for original user
-            recommendations['final_file_count'] = int(total_file_count - total_files_moved)
-            recommendations['total_recommended_moves'] = int(total_files_moved)
-            recommendations['remaining_excess_files'] = max(0, recommendations['final_file_count'] - self.file_threshold)
+            # Calculate total recommended moves and remaining excess
+            total_recommended_moves = sum([rec.get('recommended_files_to_move', 0) for rec in recommendations['recommended_splits']])
+            recommendations['total_recommended_moves'] = total_recommended_moves
+            recommendations['remaining_excess_files'] = int(remaining_files - self.file_threshold) if remaining_files > self.file_threshold else 0
+            recommendations['final_file_count'] = int(remaining_files)
             
             # Save recommendations for this user
             self.recommendations[user_email] = recommendations
             self.service_accounts[user_email] = recommendations['service_accounts']
             
             st.write(f"Final recommendations for {user_email}:")
-            st.write(f"Total files before splitting: {total_file_count:,}")
-            st.write(f"Total files to move: {total_files_moved:,}")
-            st.write(f"Final file count after all splits: {recommendations['final_file_count']:,}")
+            st.write(f"Total recommended moves: {total_recommended_moves:,}")
+            st.write(f"Final file count after all splits: {remaining_files:,}")
             st.write(f"Remaining excess: {recommendations['remaining_excess_files']:,}")
             st.write(f"Service accounts created: {len(recommendations['service_accounts'])}")
             
@@ -315,40 +305,33 @@ class FolderSplitRecommender:
                 axis=1
             )
             
-            # Truncate long folder names for better visualization
-            splits_df['short_name'] = splits_df['folder_name'].apply(
-                lambda x: x[:30] + '...' if len(str(x)) > 30 else x
-            )
-            
             user_visualizations = {}
             
             # Plot recommended files to move by folder
-            fig, ax = plt.subplots(figsize=(15, 10))  # Increased from (12, 8)
-            
-            bars = ax.barh(splits_df['short_name'], splits_df['recommended_files_to_move'],
-                         color=splits_df['split_type'].map({'Complete Split': 'green', 'Partial Split': 'orange'}))
+            fig, ax = plt.subplots(figsize=(12, 8))
+            bars = ax.barh(splits_df['folder_name'], splits_df['recommended_files_to_move'],
+                          color=splits_df['split_type'].map({'Complete Split': 'green', 'Partial Split': 'orange'}))
             
             # Add data labels
             for bar in bars:
                 width = bar.get_width()
                 ax.text(width + width*0.02, bar.get_y() + bar.get_height()/2,
-                      f'{int(width):,}',
-                      ha='left', va='center')
+                       f'{int(width):,}',
+                       ha='left', va='center')
             
-            ax.set_xlabel('Recommended Files to Move', fontsize=12)
-            ax.set_ylabel('Folder Name', fontsize=12)
-            ax.set_title(f'Recommended Folder Splits for {user_email}', fontsize=14)
-            ax.tick_params(axis='both', labelsize=10)
+            ax.set_xlabel('Recommended Files to Move')
+            ax.set_ylabel('Folder Name')
+            ax.set_title(f'Recommended Folder Splits for {user_email}')
             ax.legend(handles=[
                 plt.Rectangle((0,0),1,1, color='green', label='Complete Split'),
                 plt.Rectangle((0,0),1,1, color='orange', label='Partial Split')
-            ], fontsize=12)
+            ])
             
             plt.tight_layout()
             user_visualizations['recommendations'] = fig
             
             # Plot current vs. recommended file count
-            fig, ax = plt.subplots(figsize=(15, 10))  # Increased from (12, 8)
+            fig, ax = plt.subplots(figsize=(12, 8))
             
             # Sort by level and then by file count
             splits_df_sorted = splits_df.sort_values(['level', 'current_file_count'], ascending=[True, False])
@@ -358,22 +341,22 @@ class FolderSplitRecommender:
             
             ax.bar(x, splits_df_sorted['current_file_count'], width, label='Current File Count')
             ax.bar(x, splits_df_sorted['recommended_files_to_move'], width,
-                 label='Files to Move', alpha=0.7, color='red')
+                  label='Files to Move', alpha=0.7, color='red')
             ax.axhline(y=self.file_threshold, color='green', linestyle='--',
-                     label=f'Threshold ({self.file_threshold:,} files)')
+                      label=f'Threshold ({self.file_threshold:,} files)')
             
-            ax.set_xlabel('Folder Name', fontsize=12)
-            ax.set_ylabel('File Count', fontsize=12)
-            ax.set_title(f'Current vs. Recommended File Count for {user_email}', fontsize=14)
+            ax.set_xlabel('Folder Name')
+            ax.set_ylabel('File Count')
+            ax.set_title(f'Current vs. Recommended File Count for {user_email}')
             ax.set_xticks(x)
-            ax.set_xticklabels(splits_df_sorted['short_name'], rotation=45, ha='right', fontsize=10)
-            ax.legend(fontsize=12)
+            ax.set_xticklabels(splits_df_sorted['folder_name'], rotation=90)
+            ax.legend()
             
             plt.tight_layout()
             user_visualizations['current_vs_recommended'] = fig
             
             # Plot before and after total file count
-            fig, ax = plt.subplots(figsize=(12, 8))  # Increased from (10, 6)
+            fig, ax = plt.subplots(figsize=(10, 6))
             
             labels = ['Before Split', 'After All Splits']
             values = [user_recs['total_file_count'], user_recs['final_file_count']]
@@ -381,23 +364,22 @@ class FolderSplitRecommender:
             
             ax.bar(labels, values, color=colors)
             ax.axhline(y=self.file_threshold, color='green', linestyle='--',
-                     label=f'Threshold ({self.file_threshold:,} files)')
+                      label=f'Threshold ({self.file_threshold:,} files)')
             
             # Add data labels
             for i, v in enumerate(values):
-                ax.text(i, v + v*0.02, f'{int(v):,}', ha='center', fontsize=12)
+                ax.text(i, v + v*0.02, f'{int(v):,}', ha='center')
             
-            ax.set_ylabel('Total File Count', fontsize=12)
-            ax.set_title(f'Before vs. After All Splits for {user_email}', fontsize=14)
-            ax.tick_params(axis='both', labelsize=12)
-            ax.legend(fontsize=12)
+            ax.set_ylabel('Total File Count')
+            ax.set_title(f'Before vs. After All Splits for {user_email}')
+            ax.legend()
             
             plt.tight_layout()
             user_visualizations['before_after'] = fig
             
-            # Service account distribution visualization
+            # NEW: Service account distribution visualization
             if user_recs['service_accounts']:
-                fig, ax = plt.subplots(figsize=(15, 10))  # Increased from (12, 8)
+                fig, ax = plt.subplots(figsize=(12, 8))
                 
                 # Create labels for original user and service accounts
                 labels = [f"{user_email} (After)"]
@@ -414,17 +396,16 @@ class FolderSplitRecommender:
                 
                 # Add threshold line
                 ax.axhline(y=self.file_threshold, color='r', linestyle='--', 
-                         label=f'Threshold ({self.file_threshold:,} files)')
+                           label=f'Threshold ({self.file_threshold:,} files)')
                 
                 # Add data labels
                 for i, v in enumerate(values):
-                    ax.text(i, v + v*0.02, f'{int(v):,}', ha='center', fontsize=12)
+                    ax.text(i, v + v*0.02, f'{int(v):,}', ha='center')
                 
-                ax.set_ylabel('File Count', fontsize=12)
-                ax.set_title(f'File Distribution After Splits for {user_email}', fontsize=14)
-                ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=12)
-                ax.tick_params(axis='both', labelsize=12)
-                ax.legend(fontsize=12)
+                ax.set_ylabel('File Count')
+                ax.set_title(f'File Distribution After Splits for {user_email}')
+                ax.set_xticklabels(labels, rotation=45, ha='right')
+                ax.legend()
                 
                 plt.tight_layout()
                 user_visualizations['service_accounts'] = fig
@@ -448,7 +429,7 @@ class FolderSplitRecommender:
             summary_df = pd.DataFrame(summary_data)
             
             # Plot total file count vs. threshold for each user
-            fig, ax = plt.subplots(figsize=(12, 8))  # Increased from (10, 6)
+            fig, ax = plt.subplots(figsize=(10, 6))
             
             x = range(len(summary_df))
             width = 0.35
@@ -459,23 +440,22 @@ class FolderSplitRecommender:
             
             # Add data labels
             for i, v in enumerate(summary_df['total_file_count']):
-                ax.text(i - width/2, v + v*0.02, f'{int(v):,}', ha='center', va='bottom', rotation=0, fontsize=10)
+                ax.text(i - width/2, v + v*0.02, f'{int(v):,}', ha='center', va='bottom', rotation=0, fontsize=8)
             
             for i, v in enumerate(summary_df['final_file_count']):
-                ax.text(i + width/2, v + v*0.02, f'{int(v):,}', ha='center', va='bottom', rotation=0, fontsize=10)
+                ax.text(i + width/2, v + v*0.02, f'{int(v):,}', ha='center', va='bottom', rotation=0, fontsize=8)
             
-            ax.set_xlabel('User Email', fontsize=12)
-            ax.set_ylabel('File Count', fontsize=12)
-            ax.set_title('Before vs. After All Splits by User', fontsize=14)
+            ax.set_xlabel('User Email')
+            ax.set_ylabel('File Count')
+            ax.set_title('Before vs. After All Splits by User')
             ax.set_xticks(x)
-            ax.set_xticklabels(summary_df['user_email'], rotation=45, ha='right', fontsize=12)
-            ax.tick_params(axis='both', labelsize=12)
-            ax.legend(fontsize=12)
+            ax.set_xticklabels(summary_df['user_email'], rotation=45, ha='right')
+            ax.legend()
             
             plt.tight_layout()
             visualizations['all_users_before_after'] = fig
             
-            # Create a comprehensive visualization showing all users and service accounts
+            # NEW: Create a comprehensive visualization showing all users and service accounts
             all_entities = []
             
             # Add original users after split
@@ -498,7 +478,7 @@ class FolderSplitRecommender:
                 entities_df = pd.DataFrame(all_entities)
                 entities_df = entities_df.sort_values('files', ascending=False)
                 
-                fig, ax = plt.subplots(figsize=(16, 10))  # Increased from (14, 8)
+                fig, ax = plt.subplots(figsize=(14, 8))
                 
                 # Define colors based on type
                 colors = entities_df['type'].map({'Original User': '#66b3ff', 'Service Account': '#ff9999'})
@@ -508,22 +488,21 @@ class FolderSplitRecommender:
                 
                 # Add threshold line
                 ax.axhline(y=self.file_threshold, color='r', linestyle='--', 
-                         label=f'Threshold ({self.file_threshold:,} files)')
+                           label=f'Threshold ({self.file_threshold:,} files)')
                 
                 # Add data labels
                 for bar in bars:
                     height = bar.get_height()
                     ax.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
-                           f'{int(height):,}', ha='center', va='bottom', fontsize=10)
+                           f'{int(height):,}', ha='center', va='bottom', fontsize=8)
                 
-                ax.set_ylabel('File Count', fontsize=12)
-                ax.set_title('File Distribution Across All Users and Service Accounts', fontsize=14)
-                ax.set_xticklabels(entities_df['name'], rotation=45, ha='right', fontsize=10)
-                ax.tick_params(axis='both', labelsize=10)
+                ax.set_ylabel('File Count')
+                ax.set_title('File Distribution Across All Users and Service Accounts')
+                ax.set_xticklabels(entities_df['name'], rotation=45, ha='right')
                 ax.legend(handles=[
                     plt.Rectangle((0,0),1,1, color='#66b3ff', label='Original User'),
                     plt.Rectangle((0,0),1,1, color='#ff9999', label='Service Account')
-                ], fontsize=12)
+                ])
                 
                 plt.tight_layout()
                 visualizations['all_entities'] = fig
