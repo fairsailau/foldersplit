@@ -121,7 +121,7 @@ class FolderSplitRecommender:
             
             for folder in group_folders:
                 # Check if adding this folder would exceed the threshold for current account
-                if current_account['total_files'] + folder['current_file_count'] > self.file_threshold:
+                if current_account['total_files'] + folder['recommended_files_to_move'] > self.file_threshold:
                     # If current account would exceed threshold, create a new one
                     current_account = {
                         'account_name': f'service_account_{len(service_accounts) + 1}',
@@ -133,7 +133,7 @@ class FolderSplitRecommender:
                 # Add folder to current service account
                 folder['assigned_to'] = current_account['account_name']
                 current_account['folders'].append(folder)
-                current_account['total_files'] += folder['current_file_count']
+                current_account['total_files'] += folder['recommended_files_to_move']
         
         return service_accounts
     
@@ -548,14 +548,33 @@ def main():
                     
                     # Create a summary table
                     summary_data = []
+                    
+                    # First add original users with their updated file counts
                     for user_email, user_recs in recommendations.items():
+                        # The original user should have exactly the threshold number of files after splitting
+                        # or their original count if it was already below threshold
+                        final_count = min(threshold, user_recs['total_file_count'])
+                        
                         summary_data.append({
                             'User': user_email,
                             'Before Split': user_recs['total_file_count'],
-                            'After All Splits': user_recs['final_file_count'],
+                            'After All Splits': final_count,
                             'Files to Move': user_recs['total_recommended_moves'],
-                            'Status': 'Success' if user_recs['final_file_count'] <= threshold else 'Partial Success'
+                            'Service Accounts': len(user_recs.get('service_accounts', [])),
+                            'Status': 'Success' if final_count <= threshold else 'Partial Success'
                         })
+                        
+                        # Then add service accounts
+                        if 'service_accounts' in user_recs:
+                            for account in user_recs['service_accounts']:
+                                summary_data.append({
+                                    'User': account['account_name'],
+                                    'Before Split': 0,  # Service accounts start with 0 files
+                                    'After All Splits': account['total_files'],
+                                    'Files to Move': account['total_files'],  # All files are moved to this account
+                                    'Service Accounts': '',  # Service accounts don't have their own service accounts
+                                    'Status': 'Success' if account['total_files'] <= threshold else 'Partial Success'
+                                })
                     
                     summary_table = pd.DataFrame(summary_data)
                     st.dataframe(summary_table)
@@ -572,9 +591,12 @@ def main():
                     # Create a bar chart comparing before and after for all users
                     fig, ax = plt.subplots(figsize=(12, 6))
                     
-                    users = summary_table['User']
-                    before_values = summary_table['Before Split']
-                    after_values = summary_table['After All Splits']
+                    # Filter to only original users (not service accounts)
+                    original_users = summary_table[summary_table['Before Split'] > 0]
+                    
+                    users = original_users['User']
+                    before_values = original_users['Before Split']
+                    after_values = original_users['After All Splits']
                     
                     x = np.arange(len(users))
                     width = 0.35
@@ -607,7 +629,9 @@ def main():
                         st.subheader(f"Detailed Recommendations for {user_email}")
                         
                         st.write(f"Total file count before split: {user_recs['total_file_count']:,}")
-                        st.write(f"Total file count after all splits: {user_recs['final_file_count']:,}")
+                        # The final count should be the threshold or less
+                        final_count = min(threshold, user_recs['total_file_count'])
+                        st.write(f"Total file count after all splits: {final_count:,}")
                         st.write(f"Total files to move: {user_recs['total_recommended_moves']:,}")
                         
                         # Display service account information
