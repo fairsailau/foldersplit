@@ -9,7 +9,7 @@ from zipfile import ZipFile
 import numpy as np
 import unittest
 import logging
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Dict, List, Any, Tuple, Optional, Set
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -189,6 +189,24 @@ class FolderSplitRecommender:
             st.error(error_msg)
             raise
     
+    def _is_subfolder_of_any(self, folder_path: str, selected_folders: List[str]) -> bool:
+        """
+        Check if a folder is a subfolder of any folder in the selected_folders list.
+        
+        Args:
+            folder_path: Path of the folder to check
+            selected_folders: List of folder paths that have already been selected for splitting
+            
+        Returns:
+            True if the folder is a subfolder of any selected folder, False otherwise
+        """
+        for selected_folder in selected_folders:
+            # Check if folder_path starts with selected_folder
+            # We need to ensure it's a proper subfolder by checking for the trailing slash
+            if folder_path.startswith(selected_folder) and folder_path != selected_folder:
+                return True
+        return False
+    
     def assign_to_service_accounts(self, user_email: str, folders_to_split: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Assign folders to service accounts, keeping related folders together when possible
@@ -315,6 +333,9 @@ class FolderSplitRecommender:
                 # Track remaining files to be split
                 remaining_files = total_file_count
                 
+                # Track which folders have been selected for splitting
+                selected_folder_paths = []
+                
                 # Process all levels sequentially
                 for level in range(1, int(max_level) + 1):
                     logger.info(f"Processing level {level} folders for user {user_email}")
@@ -336,10 +357,16 @@ class FolderSplitRecommender:
                     candidates = []
                     
                     for _, folder in level_folders.iterrows():
+                        folder_path = folder['Path']
                         folder_file_count = folder['File Count']
                         
                         # Skip folders that are too small to be worth splitting
                         if folder_file_count < 10000:
+                            continue
+                        
+                        # Skip if this folder is a subfolder of any already selected folder
+                        if self._is_subfolder_of_any(folder_path, selected_folder_paths):
+                            logger.info(f"Skipping {folder_path} as it's a subfolder of an already selected folder")
                             continue
                         
                         # Check if this folder is a good candidate (≤ threshold files)
@@ -349,7 +376,7 @@ class FolderSplitRecommender:
                             
                             # Add to candidates if it helps reduce the total
                             candidates.append({
-                                'folder_path': folder['Path'],
+                                'folder_path': folder_path,
                                 'folder_name': folder['Folder Name'],
                                 'folder_id': int(folder['Folder ID']) if not pd.isna(folder['Folder ID']) else None,
                                 'level': int(folder['Level']),
@@ -384,6 +411,9 @@ class FolderSplitRecommender:
                                 'new_total_after_split': candidate['new_total']
                             })
                             
+                            # Add this folder to the selected folders list
+                            selected_folder_paths.append(candidate['folder_path'])
+                            
                             # Update remaining files
                             remaining_files = candidate['new_total']
                             logger.info(f"Added folder: {candidate['folder_path']}, new total: {remaining_files:,}")
@@ -400,10 +430,15 @@ class FolderSplitRecommender:
                     all_folders = user_folders.sort_values(['Level', 'File Count'], ascending=[True, False])
                     
                     for _, folder in all_folders.iterrows():
+                        folder_path = folder['Path']
                         folder_file_count = folder['File Count']
                         
                         # Skip folders that are too small
                         if folder_file_count < 10000:
+                            continue
+                        
+                        # Skip if this folder is a subfolder of any already selected folder
+                        if self._is_subfolder_of_any(folder_path, selected_folder_paths):
                             continue
                         
                         # For larger folders, calculate how many files to move
@@ -412,7 +447,7 @@ class FolderSplitRecommender:
                         # Only recommend if this folder has enough files
                         if files_to_move > 0 and files_to_move < folder_file_count:
                             recommendations['recommended_splits'].append({
-                                'folder_path': folder['Path'],
+                                'folder_path': folder_path,
                                 'folder_name': folder['Folder Name'],
                                 'folder_id': int(folder['Folder ID']) if not pd.isna(folder['Folder ID']) else None,
                                 'level': int(folder['Level']),
@@ -423,10 +458,13 @@ class FolderSplitRecommender:
                                 'is_partial_split': True
                             })
                             
+                            # Add this folder to the selected folders list
+                            selected_folder_paths.append(folder_path)
+                            
                             # Update remaining files
                             remaining_files = self.file_threshold
-                            logger.info(f"Added partial split of folder: {folder['Path']}, new total: {remaining_files:,}")
-                            st.write(f"Added partial split of folder: {folder['Path']}, new total: {remaining_files:,}")
+                            logger.info(f"Added partial split of folder: {folder_path}, new total: {remaining_files:,}")
+                            st.write(f"Added partial split of folder: {folder_path}, new total: {remaining_files:,}")
                             break
                 
                 # Calculate total recommended moves and remaining excess
@@ -826,6 +864,22 @@ class FolderSplitRecommenderTests(unittest.TestCase):
         # folder2 direct count should be 200000 - 100000 = 100000
         self.assertEqual(self.test_data.at[folder2_idx, 'direct_file_count'], 100000)
     
+    def test_is_subfolder_of_any(self):
+        """Test that subfolder detection works correctly."""
+        selected_folders = ['/folder1/', '/folder3/']
+        
+        # Test a subfolder of folder1
+        self.assertTrue(self.recommender._is_subfolder_of_any('/folder1/subfolder1/', selected_folders))
+        
+        # Test a subfolder of folder3
+        self.assertTrue(self.recommender._is_subfolder_of_any('/folder3/some_subfolder/', selected_folders))
+        
+        # Test a folder that is not a subfolder of any selected folder
+        self.assertFalse(self.recommender._is_subfolder_of_any('/folder2/', selected_folders))
+        
+        # Test a selected folder itself (should return False)
+        self.assertFalse(self.recommender._is_subfolder_of_any('/folder1/', selected_folders))
+    
     def test_prioritize_folders(self):
         """Test that folders are prioritized correctly."""
         recommendations = self.recommender.prioritize_folders()
@@ -843,6 +897,13 @@ class FolderSplitRecommenderTests(unittest.TestCase):
         
         # Check that at least one folder is recommended for splitting
         self.assertGreater(len(user_recs['recommended_splits']), 0)
+        
+        # Check that no subfolder of a selected folder is included in recommendations
+        selected_paths = [folder['folder_path'] for folder in user_recs['recommended_splits']]
+        for path in selected_paths:
+            for other_path in selected_paths:
+                if path != other_path:
+                    self.assertFalse(self.recommender._is_subfolder_of_any(path, [other_path]))
     
     def test_assign_to_service_accounts(self):
         """Test that folders are assigned to service accounts correctly."""
@@ -908,6 +969,7 @@ def main():
     3. Continues adding folders from each level until the user's total file count is reduced to 500,000 or less
     4. Shows the total count after all splits for each specific user
     5. Assigns files to service accounts (service_account_1, service_account_2, etc.) while ensuring each service account stays under the threshold
+    6. Properly handles parent-child folder relationships - when a parent folder is selected for splitting, its subfolders are automatically included and not evaluated separately
     """)
     
     # File upload
