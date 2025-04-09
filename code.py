@@ -282,9 +282,15 @@ class FolderSplitRecommender:
             
             # Calculate total recommended moves and remaining excess
             total_recommended_moves = sum([rec.get('recommended_files_to_move', 0) for rec in recommendations['recommended_splits']])
+            
+            # Ensure total_recommended_moves doesn't exceed the original file count
+            total_recommended_moves = min(total_recommended_moves, total_file_count)
+            
             recommendations['total_recommended_moves'] = total_recommended_moves
             recommendations['remaining_excess_files'] = int(remaining_files - self.file_threshold) if remaining_files > self.file_threshold else 0
-            recommendations['final_file_count'] = int(remaining_files)
+            
+            # Ensure final_file_count is correctly set to threshold or less
+            recommendations['final_file_count'] = min(int(remaining_files), self.file_threshold)
             
             # Assign folders to service accounts
             service_accounts = self.assign_to_service_accounts(user_email, recommendations['recommended_splits'])
@@ -295,7 +301,7 @@ class FolderSplitRecommender:
             
             st.write(f"Final recommendations for {user_email}:")
             st.write(f"Total recommended moves: {total_recommended_moves:,}")
-            st.write(f"Final file count after all splits: {remaining_files:,}")
+            st.write(f"Final file count after all splits: {recommendations['final_file_count']:,}")
             st.write(f"Remaining excess: {recommendations['remaining_excess_files']:,}")
             st.write(f"Number of service accounts needed: {len(service_accounts)}")
         
@@ -551,15 +557,18 @@ def main():
                     
                     # First add original users with their updated file counts
                     for user_email, user_recs in recommendations.items():
-                        # The original user should have exactly the threshold number of files after splitting
+                        # Ensure the original user has exactly the threshold number of files after splitting
                         # or their original count if it was already below threshold
                         final_count = min(threshold, user_recs['total_file_count'])
+                        
+                        # Calculate files to move - this should never exceed the original count
+                        files_to_move = min(user_recs['total_file_count'] - final_count, user_recs['total_file_count'])
                         
                         summary_data.append({
                             'User': user_email,
                             'Before Split': user_recs['total_file_count'],
                             'After All Splits': final_count,
-                            'Files to Move': user_recs['total_recommended_moves'],
+                            'Files to Move': files_to_move,
                             'Service Accounts': len(user_recs.get('service_accounts', [])),
                             'Status': 'Success' if final_count <= threshold else 'Partial Success'
                         })
@@ -632,7 +641,10 @@ def main():
                         # The final count should be the threshold or less
                         final_count = min(threshold, user_recs['total_file_count'])
                         st.write(f"Total file count after all splits: {final_count:,}")
-                        st.write(f"Total files to move: {user_recs['total_recommended_moves']:,}")
+                        
+                        # Calculate files to move - this should never exceed the original count
+                        files_to_move = min(user_recs['total_file_count'] - final_count, user_recs['total_file_count'])
+                        st.write(f"Total files to move: {files_to_move:,}")
                         
                         # Display service account information
                         if 'service_accounts' in user_recs and user_recs['service_accounts']:
