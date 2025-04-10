@@ -53,7 +53,7 @@ class FolderSplitRecommender:
                 - Folder Name: Name of the folder
                 - Folder ID: Integer ID of the folder
                 - Owner: Email of the user that owns the folder
-                - Size (MB): Size of the folder in MB
+                - Size (MB): Size of the folder in MB (optional)
                 - File Count: Number of active files within the folder and all subfolders
                 - Level: Folder level in the folder tree hierarchy (1 is root level)
             file_threshold: Maximum number of files a user should have (default: 500,000)
@@ -73,9 +73,10 @@ class FolderSplitRecommender:
         Raises:
             ValueError: If required columns are missing or have incorrect data types
         """
-        required_columns = ['Path', 'Folder Name', 'Folder ID', 'Owner', 'Size (MB)', 'File Count', 'Level']
+        required_columns = ['Path', 'Folder Name', 'Folder ID', 'Owner', 'File Count', 'Level']
+        optional_columns = ['Size (MB)']
         
-        # Check for missing columns
+        # Check for missing required columns
         missing_columns = [col for col in required_columns if col not in self.df.columns]
         if missing_columns:
             error_msg = f"Missing required columns: {', '.join(missing_columns)}"
@@ -87,7 +88,14 @@ class FolderSplitRecommender:
             # Convert numeric columns to appropriate types if they aren't already
             self.df['File Count'] = pd.to_numeric(self.df['File Count'])
             self.df['Level'] = pd.to_numeric(self.df['Level'])
-            self.df['Size (MB)'] = pd.to_numeric(self.df['Size (MB)'])
+            
+            # Convert Size (MB) if it exists
+            if 'Size (MB)' in self.df.columns:
+                self.df['Size (MB)'] = pd.to_numeric(self.df['Size (MB)'])
+            else:
+                # Add a default Size (MB) column if it doesn't exist
+                logger.warning("'Size (MB)' column not found, adding default values")
+                self.df['Size (MB)'] = 0
             
             # Ensure Path and Owner are strings
             self.df['Path'] = self.df['Path'].astype(str)
@@ -490,8 +498,8 @@ class FolderSplitRecommender:
         - Before and after total file count
         - Distribution across service accounts
         - Folder distribution across service accounts
-        - Folder size distribution (NEW)
-        - Folder level distribution (NEW)
+        - Folder size distribution (if Size (MB) column exists)
+        - Folder level distribution
         
         Returns:
             Dictionary of visualizations for each user
@@ -520,185 +528,214 @@ class FolderSplitRecommender:
                 user_visualizations = {}
                 
                 # 1. Plot recommended files to move by folder
-                fig, ax = plt.subplots(figsize=(12, 8))
-                bars = ax.barh(splits_df['folder_name'], splits_df['recommended_files_to_move'], 
-                        color=splits_df['split_type'].map({'Complete Split': 'green', 'Partial Split': 'orange'}))
-                
-                # Add data labels
-                for bar in bars:
-                    width = bar.get_width()
-                    ax.text(width + width*0.02, bar.get_y() + bar.get_height()/2, 
-                            f'{int(width):,}',
-                            ha='left', va='center')
-                
-                ax.set_xlabel('Recommended Files to Move')
-                ax.set_ylabel('Folder Name')
-                ax.set_title(f'Recommended Folder Splits for {user_email}')
-                ax.legend(handles=[
-                    plt.Rectangle((0,0),1,1, color='green', label='Complete Split'),
-                    plt.Rectangle((0,0),1,1, color='orange', label='Partial Split')
-                ])
-                plt.tight_layout()
-                user_visualizations['recommendations'] = fig
+                try:
+                    fig, ax = plt.subplots(figsize=(12, 8))
+                    bars = ax.barh(splits_df['folder_name'], splits_df['recommended_files_to_move'], 
+                            color=splits_df['split_type'].map({'Complete Split': 'green', 'Partial Split': 'orange'}))
+                    
+                    # Add data labels
+                    for bar in bars:
+                        width = bar.get_width()
+                        ax.text(width + width*0.02, bar.get_y() + bar.get_height()/2, 
+                                f'{int(width):,}',
+                                ha='left', va='center')
+                    
+                    ax.set_xlabel('Recommended Files to Move')
+                    ax.set_ylabel('Folder Name')
+                    ax.set_title(f'Recommended Folder Splits for {user_email}')
+                    ax.legend(handles=[
+                        plt.Rectangle((0,0),1,1, color='green', label='Complete Split'),
+                        plt.Rectangle((0,0),1,1, color='orange', label='Partial Split')
+                    ])
+                    plt.tight_layout()
+                    user_visualizations['recommendations'] = fig
+                except Exception as e:
+                    logger.error(f"Error creating recommendations visualization: {str(e)}")
+                    st.error(f"Error creating recommendations visualization: {str(e)}")
                 
                 # 2. Plot current vs. recommended file count
-                fig, ax = plt.subplots(figsize=(12, 8))
-                
-                # Sort by file count (descending)
-                splits_df_sorted = splits_df.sort_values('current_file_count', ascending=False)
-                
-                x = range(len(splits_df_sorted))
-                width = 0.35
-                
-                ax.bar(x, splits_df_sorted['current_file_count'], width, label='Current File Count')
-                ax.bar(x, splits_df_sorted['recommended_files_to_move'], width, 
-                       label='Files to Move', alpha=0.7, color='red')
-                
-                ax.axhline(y=self.file_threshold, color='green', linestyle='--', 
-                           label=f'Threshold ({self.file_threshold:,} files)')
-                
-                ax.set_xlabel('Folder Name')
-                ax.set_ylabel('File Count')
-                ax.set_title(f'Current vs. Recommended File Count for {user_email}')
-                ax.set_xticks(x)
-                ax.set_xticklabels(splits_df_sorted['folder_name'], rotation=90)
-                ax.legend()
-                plt.tight_layout()
-                user_visualizations['current_vs_recommended'] = fig
+                try:
+                    fig, ax = plt.subplots(figsize=(12, 8))
+                    
+                    # Sort by file count (descending)
+                    splits_df_sorted = splits_df.sort_values('current_file_count', ascending=False)
+                    
+                    x = range(len(splits_df_sorted))
+                    width = 0.35
+                    
+                    ax.bar(x, splits_df_sorted['current_file_count'], width, label='Current File Count')
+                    ax.bar(x, splits_df_sorted['recommended_files_to_move'], width, 
+                           label='Files to Move', alpha=0.7, color='red')
+                    
+                    ax.axhline(y=self.file_threshold, color='green', linestyle='--', 
+                               label=f'Threshold ({self.file_threshold:,} files)')
+                    
+                    ax.set_xlabel('Folder Name')
+                    ax.set_ylabel('File Count')
+                    ax.set_title(f'Current vs. Recommended File Count for {user_email}')
+                    ax.set_xticks(x)
+                    ax.set_xticklabels(splits_df_sorted['folder_name'], rotation=90)
+                    ax.legend()
+                    plt.tight_layout()
+                    user_visualizations['current_vs_recommended'] = fig
+                except Exception as e:
+                    logger.error(f"Error creating current vs recommended visualization: {str(e)}")
+                    st.error(f"Error creating current vs recommended visualization: {str(e)}")
                 
                 # 3. Plot before and after total file count
-                fig, ax = plt.subplots(figsize=(10, 6))
-                
-                labels = ['Before Split', 'After All Splits']
-                values = [user_recs['total_file_count'], user_recs['final_file_count']]
-                colors = ['#ff9999', '#66b3ff']
-                
-                ax.bar(labels, values, color=colors)
-                ax.axhline(y=self.file_threshold, color='green', linestyle='--', 
-                           label=f'Threshold ({self.file_threshold:,} files)')
-                
-                # Add data labels
-                for i, v in enumerate(values):
-                    ax.text(i, v + v*0.02, f'{int(v):,}', ha='center')
-                
-                ax.set_ylabel('Total File Count')
-                ax.set_title(f'Before vs. After All Splits for {user_email}')
-                ax.legend()
-                plt.tight_layout()
-                user_visualizations['before_after'] = fig
-                
-                # 4. Plot distribution across service accounts
-                if 'service_accounts' in user_recs and user_recs['service_accounts']:
-                    # Create data for service account distribution
-                    account_names = [account['account_name'] for account in user_recs['service_accounts']]
-                    account_names.insert(0, f"{user_email} (After Split)")
+                try:
+                    fig, ax = plt.subplots(figsize=(10, 6))
                     
-                    file_counts = [account['total_files'] for account in user_recs['service_accounts']]
-                    file_counts.insert(0, user_recs['final_file_count'])
+                    labels = ['Before Split', 'After All Splits']
+                    values = [user_recs['total_file_count'], user_recs['final_file_count']]
+                    colors = ['#ff9999', '#66b3ff']
                     
-                    # Create bar chart
-                    fig, ax = plt.subplots(figsize=(12, 8))
-                    bars = ax.bar(account_names, file_counts, color=['#66b3ff'] + ['#ff9999'] * len(user_recs['service_accounts']))
-                    
-                    # Add threshold line
+                    ax.bar(labels, values, color=colors)
                     ax.axhline(y=self.file_threshold, color='green', linestyle='--', 
                                label=f'Threshold ({self.file_threshold:,} files)')
                     
                     # Add data labels
-                    for bar in bars:
-                        height = bar.get_height()
-                        ax.text(bar.get_x() + bar.get_width()/2., height + height*0.02,
-                                f'{int(height):,}', ha='center', va='bottom')
+                    for i, v in enumerate(values):
+                        ax.text(i, v + v*0.02, f'{int(v):,}', ha='center')
                     
-                    ax.set_xlabel('Account')
-                    ax.set_ylabel('File Count')
-                    ax.set_title(f'File Distribution Across Accounts for {user_email}')
-                    plt.xticks(rotation=45, ha='right')
+                    ax.set_ylabel('Total File Count')
+                    ax.set_title(f'Before vs. After All Splits for {user_email}')
                     ax.legend()
                     plt.tight_layout()
-                    user_visualizations['service_account_distribution'] = fig
+                    user_visualizations['before_after'] = fig
+                except Exception as e:
+                    logger.error(f"Error creating before/after visualization: {str(e)}")
+                    st.error(f"Error creating before/after visualization: {str(e)}")
+                
+                # 4. Plot distribution across service accounts
+                if 'service_accounts' in user_recs and user_recs['service_accounts']:
+                    try:
+                        # Create data for service account distribution
+                        account_names = [account['account_name'] for account in user_recs['service_accounts']]
+                        account_names.insert(0, f"{user_email} (After Split)")
+                        
+                        file_counts = [account['total_files'] for account in user_recs['service_accounts']]
+                        file_counts.insert(0, user_recs['final_file_count'])
+                        
+                        # Create bar chart
+                        fig, ax = plt.subplots(figsize=(12, 8))
+                        bars = ax.bar(account_names, file_counts, color=['#66b3ff'] + ['#ff9999'] * len(user_recs['service_accounts']))
+                        
+                        # Add threshold line
+                        ax.axhline(y=self.file_threshold, color='green', linestyle='--', 
+                                   label=f'Threshold ({self.file_threshold:,} files)')
+                        
+                        # Add data labels
+                        for bar in bars:
+                            height = bar.get_height()
+                            ax.text(bar.get_x() + bar.get_width()/2., height + height*0.02,
+                                    f'{int(height):,}', ha='center', va='bottom')
+                        
+                        ax.set_xlabel('Account')
+                        ax.set_ylabel('File Count')
+                        ax.set_title(f'File Distribution Across Accounts for {user_email}')
+                        plt.xticks(rotation=45, ha='right')
+                        ax.legend()
+                        plt.tight_layout()
+                        user_visualizations['service_account_distribution'] = fig
+                    except Exception as e:
+                        logger.error(f"Error creating service account distribution visualization: {str(e)}")
+                        st.error(f"Error creating service account distribution visualization: {str(e)}")
                     
                     # 5. Create a visualization showing which folders go to which service account
-                    # Group folders by service account
-                    account_folders = {}
-                    for folder in user_recs['recommended_splits']:
-                        account = folder.get('assigned_to', 'Unknown')
-                        if account not in account_folders:
-                            account_folders[account] = []
-                        account_folders[account].append(folder)
-                    
-                    # Create a stacked bar chart showing folder distribution
-                    account_labels = list(account_folders.keys())
-                    folder_counts = []
-                    folder_labels = []
-                    
-                    # Prepare data for stacked bar chart
-                    for account in account_labels:
-                        folders = account_folders[account]
-                        for folder in folders:
-                            folder_counts.append(folder['recommended_files_to_move'])
-                            folder_labels.append(f"{folder['folder_name']} ({account})")
-                    
-                    # Create horizontal stacked bar chart
-                    fig, ax = plt.subplots(figsize=(14, 10))
-                    
-                    # Use a colormap to assign different colors to different folders
-                    colors = plt.cm.viridis(np.linspace(0, 1, len(folder_counts)))
-                    
-                    # Create the stacked bar chart
-                    y_pos = 0
-                    for i, (count, label, color) in enumerate(zip(folder_counts, folder_labels, colors)):
-                        ax.barh(y_pos, count, color=color, label=label)
-                        # Add text label inside the bar if there's enough space
-                        if count > max(folder_counts) * 0.05:
-                            ax.text(count/2, y_pos, label, ha='center', va='center', color='white')
-                        y_pos += 1
-                    
-                    ax.set_yticks([])  # Hide y-axis ticks
-                    ax.set_xlabel('File Count')
-                    ax.set_title(f'Folder Distribution Across Service Accounts for {user_email}')
-                    
-                    # Create a custom legend
-                    handles = [plt.Rectangle((0,0),1,1, color=color) for color in colors]
-                    ax.legend(handles, folder_labels, loc='upper right', bbox_to_anchor=(1.1, 1), 
-                              ncol=1, fontsize='small')
-                    
-                    plt.tight_layout()
-                    user_visualizations['folder_distribution'] = fig
+                    try:
+                        # Group folders by service account
+                        account_folders = {}
+                        for folder in user_recs['recommended_splits']:
+                            account = folder.get('assigned_to', 'Unknown')
+                            if account not in account_folders:
+                                account_folders[account] = []
+                            account_folders[account].append(folder)
+                        
+                        # Create a stacked bar chart showing folder distribution
+                        account_labels = list(account_folders.keys())
+                        folder_counts = []
+                        folder_labels = []
+                        
+                        # Prepare data for stacked bar chart
+                        for account in account_labels:
+                            folders = account_folders[account]
+                            for folder in folders:
+                                folder_counts.append(folder['recommended_files_to_move'])
+                                folder_labels.append(f"{folder['folder_name']} ({account})")
+                        
+                        # Create horizontal stacked bar chart
+                        fig, ax = plt.subplots(figsize=(14, 10))
+                        
+                        # Use a colormap to assign different colors to different folders
+                        colors = plt.cm.viridis(np.linspace(0, 1, len(folder_counts)))
+                        
+                        # Create the stacked bar chart
+                        y_pos = 0
+                        for i, (count, label, color) in enumerate(zip(folder_counts, folder_labels, colors)):
+                            ax.barh(y_pos, count, color=color, label=label)
+                            # Add text label inside the bar if there's enough space
+                            if count > max(folder_counts) * 0.05:
+                                ax.text(count/2, y_pos, label, ha='center', va='center', color='white')
+                            y_pos += 1
+                        
+                        ax.set_yticks([])  # Hide y-axis ticks
+                        ax.set_xlabel('File Count')
+                        ax.set_title(f'Folder Distribution Across Service Accounts for {user_email}')
+                        
+                        # Create a custom legend
+                        handles = [plt.Rectangle((0,0),1,1, color=color) for color in colors]
+                        ax.legend(handles, folder_labels, loc='upper right', bbox_to_anchor=(1.1, 1), 
+                                  ncol=1, fontsize='small')
+                        
+                        plt.tight_layout()
+                        user_visualizations['folder_distribution'] = fig
+                    except Exception as e:
+                        logger.error(f"Error creating folder distribution visualization: {str(e)}")
+                        st.error(f"Error creating folder distribution visualization: {str(e)}")
                 
-                # 6. Folder size distribution
-                fig, ax = plt.subplots(figsize=(10, 6))
-                
-                # Create size bins
-                size_bins = [0, 10, 50, 100, 500, 1000, float('inf')]
-                size_labels = ['<10MB', '10-50MB', '50-100MB', '100-500MB', '500MB-1GB', '>1GB']
-                
-                # Count folders in each bin
-                size_counts = []
-                for i in range(len(size_bins)-1):
-                    count = len(splits_df[(splits_df['Size (MB)'] >= size_bins[i]) & 
-                                         (splits_df['Size (MB)'] < size_bins[i+1])])
-                    size_counts.append(count)
-                
-                ax.bar(size_labels, size_counts, color='skyblue')
-                ax.set_xlabel('Folder Size')
-                ax.set_ylabel('Number of Folders')
-                ax.set_title(f'Size Distribution of Recommended Folders for {user_email}')
-                plt.tight_layout()
-                user_visualizations['size_distribution'] = fig
+                # 6. Folder size distribution (only if Size (MB) column exists in splits_df)
+                try:
+                    if 'Size (MB)' in splits_df.columns:
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        
+                        # Create size bins
+                        size_bins = [0, 10, 50, 100, 500, 1000, float('inf')]
+                        size_labels = ['<10MB', '10-50MB', '50-100MB', '100-500MB', '500MB-1GB', '>1GB']
+                        
+                        # Count folders in each bin
+                        size_counts = []
+                        for i in range(len(size_bins)-1):
+                            count = len(splits_df[(splits_df['Size (MB)'] >= size_bins[i]) & 
+                                                 (splits_df['Size (MB)'] < size_bins[i+1])])
+                            size_counts.append(count)
+                        
+                        ax.bar(size_labels, size_counts, color='skyblue')
+                        ax.set_xlabel('Folder Size')
+                        ax.set_ylabel('Number of Folders')
+                        ax.set_title(f'Size Distribution of Recommended Folders for {user_email}')
+                        plt.tight_layout()
+                        user_visualizations['size_distribution'] = fig
+                except Exception as e:
+                    logger.error(f"Error creating size distribution visualization: {str(e)}")
+                    # Don't show error to user for this optional visualization
                 
                 # 7. Folder level distribution
-                fig, ax = plt.subplots(figsize=(10, 6))
-                
-                # Count folders at each level
-                level_counts = splits_df['level'].value_counts().sort_index()
-                
-                ax.bar(level_counts.index.astype(str), level_counts.values, color='lightgreen')
-                ax.set_xlabel('Folder Level')
-                ax.set_ylabel('Number of Folders')
-                ax.set_title(f'Level Distribution of Recommended Folders for {user_email}')
-                plt.tight_layout()
-                user_visualizations['level_distribution'] = fig
+                try:
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    
+                    # Count folders at each level
+                    level_counts = splits_df['level'].value_counts().sort_index()
+                    
+                    ax.bar(level_counts.index.astype(str), level_counts.values, color='lightgreen')
+                    ax.set_xlabel('Folder Level')
+                    ax.set_ylabel('Number of Folders')
+                    ax.set_title(f'Level Distribution of Recommended Folders for {user_email}')
+                    plt.tight_layout()
+                    user_visualizations['level_distribution'] = fig
+                except Exception as e:
+                    logger.error(f"Error creating level distribution visualization: {str(e)}")
+                    st.error(f"Error creating level distribution visualization: {str(e)}")
                 
                 # Save visualizations for this user
                 visualizations[user_email] = user_visualizations
@@ -709,7 +746,8 @@ class FolderSplitRecommender:
             error_msg = f"Error creating visualizations: {str(e)}"
             logger.error(error_msg)
             st.error(error_msg)
-            raise
+            # Return empty dict instead of raising exception to allow the app to continue
+            return {}
     
     def create_summary_table(self) -> pd.DataFrame:
         """
@@ -972,9 +1010,13 @@ def main():
                         recommendations = recommender.prioritize_folders()
                         st.session_state.recommendations = recommendations
                         
-                        # Create visualizations
-                        visualizations = recommender.visualize_recommendations()
-                        st.session_state.visualizations = visualizations
+                        # Create visualizations with error handling
+                        try:
+                            visualizations = recommender.visualize_recommendations()
+                            st.session_state.visualizations = visualizations
+                        except Exception as e:
+                            st.error(f"Error creating visualizations: {str(e)}")
+                            st.session_state.visualizations = {}
                         
                         # Create summary table
                         summary_table = recommender.create_summary_table()
@@ -989,11 +1031,11 @@ def main():
                 st.subheader("Recommendations Summary")
                 st.dataframe(st.session_state.summary_table)
                 
-                # Show visualizations for each user
-                st.subheader("Visualizations")
-                
-                # Create tabs for each user
-                if st.session_state.visualizations:
+                # Show visualizations for each user if available
+                if st.session_state.visualizations and len(st.session_state.visualizations) > 0:
+                    st.subheader("Visualizations")
+                    
+                    # Create tabs for each user
                     user_tabs = st.tabs(list(st.session_state.visualizations.keys()))
                     
                     for i, (user_email, user_viz) in enumerate(st.session_state.visualizations.items()):
@@ -1007,19 +1049,21 @@ def main():
                             st.write(f"**Folders to Split:** {len(user_recs['recommended_splits'])}")
                             st.write(f"**Service Accounts Needed:** {len(user_recs['service_accounts'])}")
                             
-                            # Show visualizations
-                            viz_tabs = st.tabs([
-                                "Recommended Splits", 
-                                "Before vs. After", 
-                                "Service Account Distribution",
-                                "Folder Distribution",
-                                "Size Distribution",
-                                "Level Distribution"
-                            ])
-                            
-                            with viz_tabs[0]:
-                                if 'recommendations' in user_viz:
-                                    st.pyplot(user_viz['recommendations'])
+                            # Show visualizations if available
+                            available_viz = [viz for viz in user_viz.keys()]
+                            if available_viz:
+                                viz_tabs = st.tabs([
+                                    "Recommended Splits", 
+                                    "Before vs. After", 
+                                    "Service Account Distribution",
+                                    "Folder Distribution",
+                                    "Size Distribution",
+                                    "Level Distribution"
+                                ])
+                                
+                                with viz_tabs[0]:
+                                    if 'recommendations' in user_viz:
+                                        st.pyplot(user_viz['recommendations'])
                                     
                                     # Show table of recommended splits
                                     splits_df = pd.DataFrame([
@@ -1035,38 +1079,44 @@ def main():
                                         for split in user_recs['recommended_splits']
                                     ])
                                     st.dataframe(splits_df)
-                            
-                            with viz_tabs[1]:
-                                if 'before_after' in user_viz:
-                                    st.pyplot(user_viz['before_after'])
-                            
-                            with viz_tabs[2]:
-                                if 'service_account_distribution' in user_viz:
-                                    st.pyplot(user_viz['service_account_distribution'])
-                                    
-                                    # Show table of service accounts
-                                    accounts_df = pd.DataFrame([
-                                        {
-                                            'Account': account['account_name'],
-                                            'Total Files': account['total_files'],
-                                            'Folder Count': len(account['folders']),
-                                            'Utilization': f"{account['total_files'] / file_threshold * 100:.1f}%"
-                                        }
-                                        for account in user_recs['service_accounts']
-                                    ])
-                                    st.dataframe(accounts_df)
-                            
-                            with viz_tabs[3]:
-                                if 'folder_distribution' in user_viz:
-                                    st.pyplot(user_viz['folder_distribution'])
-                            
-                            with viz_tabs[4]:
-                                if 'size_distribution' in user_viz:
-                                    st.pyplot(user_viz['size_distribution'])
-                            
-                            with viz_tabs[5]:
-                                if 'level_distribution' in user_viz:
-                                    st.pyplot(user_viz['level_distribution'])
+                                
+                                with viz_tabs[1]:
+                                    if 'before_after' in user_viz:
+                                        st.pyplot(user_viz['before_after'])
+                                
+                                with viz_tabs[2]:
+                                    if 'service_account_distribution' in user_viz:
+                                        st.pyplot(user_viz['service_account_distribution'])
+                                        
+                                        # Show table of service accounts
+                                        accounts_df = pd.DataFrame([
+                                            {
+                                                'Account': account['account_name'],
+                                                'Total Files': account['total_files'],
+                                                'Folder Count': len(account['folders']),
+                                                'Utilization': f"{account['total_files'] / file_threshold * 100:.1f}%"
+                                            }
+                                            for account in user_recs['service_accounts']
+                                        ])
+                                        st.dataframe(accounts_df)
+                                
+                                with viz_tabs[3]:
+                                    if 'folder_distribution' in user_viz:
+                                        st.pyplot(user_viz['folder_distribution'])
+                                
+                                with viz_tabs[4]:
+                                    if 'size_distribution' in user_viz:
+                                        st.pyplot(user_viz['size_distribution'])
+                                    else:
+                                        st.info("Size distribution visualization not available. 'Size (MB)' column may be missing or contain invalid data.")
+                                
+                                with viz_tabs[5]:
+                                    if 'level_distribution' in user_viz:
+                                        st.pyplot(user_viz['level_distribution'])
+                            else:
+                                st.warning("Visualizations could not be generated. Please check the logs for details.")
+                else:
+                    st.warning("Visualizations could not be generated. This may be due to missing or invalid data.")
                 
                 # Export options
                 st.subheader("Export Recommendations")
