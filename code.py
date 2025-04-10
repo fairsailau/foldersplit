@@ -337,6 +337,9 @@ class FolderSplitRecommender:
                 # Track which folders have been selected for splitting
                 selected_folder_paths = []
                 
+                # Track how many files we need to move
+                files_to_move = excess_files
+                
                 # Find suitable candidates across all levels
                 candidates = []
                 
@@ -353,21 +356,15 @@ class FolderSplitRecommender:
                     if self._is_subfolder_of_any(folder_path, selected_folder_paths):
                         continue
                     
-                    # Check if this folder is a good candidate (≤ threshold files)
-                    if folder_file_count <= self.file_threshold:
-                        # Calculate how much this split would reduce the total
-                        new_total = remaining_files - folder_file_count
-                        
-                        # Add to candidates
-                        candidates.append({
-                            'folder_path': folder_path,
-                            'folder_name': folder['Folder Name'],
-                            'folder_id': int(folder['Folder ID']) if not pd.isna(folder['Folder ID']) else None,
-                            'level': int(folder['Level']),
-                            'current_file_count': int(folder_file_count),
-                            'direct_file_count': int(folder['direct_file_count']),
-                            'new_total': new_total
-                        })
+                    # Add to candidates
+                    candidates.append({
+                        'folder_path': folder_path,
+                        'folder_name': folder['Folder Name'],
+                        'folder_id': int(folder['Folder ID']) if not pd.isna(folder['Folder ID']) else None,
+                        'level': int(folder['Level']),
+                        'current_file_count': int(folder_file_count),
+                        'direct_file_count': int(folder['direct_file_count']),
+                    })
                 
                 # Sort candidates by file count (descending) to prioritize larger folders
                 candidates.sort(key=lambda x: x['current_file_count'], reverse=True)
@@ -375,79 +372,109 @@ class FolderSplitRecommender:
                 logger.info(f"Found {len(candidates)} candidates across all levels")
                 st.write(f"Found {len(candidates)} candidates across all levels")
                 
-                # Add candidates to recommendations until we're below threshold or no more candidates
+                # First, try to find folders that are close to the excess files we need to move
+                best_fit_candidates = []
+                remaining_to_move = files_to_move
+                
+                # Try to find folders that fit well with the excess files we need to move
                 for candidate in candidates:
-                    # Skip if we're already below threshold
-                    if remaining_files <= self.file_threshold:
-                        break
-                    
-                    # Add this candidate to recommendations
-                    recommendations['recommended_splits'].append({
-                        'folder_path': candidate['folder_path'],
-                        'folder_name': candidate['folder_name'],
-                        'folder_id': candidate['folder_id'],
-                        'level': candidate['level'],
-                        'current_file_count': candidate['current_file_count'],
-                        'direct_file_count': candidate['direct_file_count'],
-                        'recommended_files_to_move': candidate['current_file_count'],
-                        'new_total_after_split': candidate['new_total']
-                    })
-                    
-                    # Add this folder to the selected folders list
-                    selected_folder_paths.append(candidate['folder_path'])
-                    
-                    # Update remaining files
-                    remaining_files = candidate['new_total']
-                    logger.info(f"Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_files:,}")
-                    st.write(f"  Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_files:,}")
+                    # If this folder is smaller than what we need to move, add it
+                    if candidate['current_file_count'] <= remaining_to_move:
+                        best_fit_candidates.append(candidate)
+                        remaining_to_move -= candidate['current_file_count']
+                        
+                        # If we've found enough folders, stop
+                        if remaining_to_move <= 0:
+                            break
                 
-                st.write(f"After processing all candidates, remaining files: {remaining_files:,}")
+                # If we couldn't find a good combination, just use the smallest folder that exceeds what we need
+                if remaining_to_move > 0:
+                    # Sort by file count (ascending) to find the smallest folder that exceeds what we need
+                    candidates_asc = sorted(candidates, key=lambda x: x['current_file_count'])
+                    
+                    for candidate in candidates_asc:
+                        if candidate['current_file_count'] >= files_to_move:
+                            best_fit_candidates = [candidate]
+                            remaining_to_move = 0
+                            break
                 
-                # If we still haven't reached the threshold, look for partial splits
-                if remaining_files > self.file_threshold:
-                    logger.info("Still above threshold after all candidates, looking for partial splits...")
-                    st.write("Still above threshold after all candidates, looking for partial splits...")
+                # If we still couldn't find a good fit, use partial splits
+                if remaining_to_move > 0:
+                    # Find the largest folder
+                    largest_folder = max(candidates, key=lambda x: x['current_file_count'])
                     
-                    # Get all folders sorted by file count (descending)
-                    all_folders = user_folders.sort_values('File Count', ascending=False)
-                    
-                    for _, folder in all_folders.iterrows():
-                        folder_path = folder['Path']
-                        folder_file_count = folder['File Count']
+                    # Check if we can do a partial split
+                    if largest_folder['current_file_count'] > files_to_move:
+                        # Add as a partial split
+                        recommendations['recommended_splits'].append({
+                            'folder_path': largest_folder['folder_path'],
+                            'folder_name': largest_folder['folder_name'],
+                            'folder_id': largest_folder['folder_id'],
+                            'level': largest_folder['level'],
+                            'current_file_count': largest_folder['current_file_count'],
+                            'direct_file_count': largest_folder['direct_file_count'],
+                            'recommended_files_to_move': int(files_to_move),
+                            'new_total_after_split': self.file_threshold,
+                            'is_partial_split': True
+                        })
                         
-                        # Skip folders that are too small
-                        if folder_file_count < 10000:
-                            continue
+                        # Add this folder to the selected folders list
+                        selected_folder_paths.append(largest_folder['folder_path'])
                         
-                        # Skip if this folder is a subfolder of any already selected folder
-                        if self._is_subfolder_of_any(folder_path, selected_folder_paths):
-                            continue
-                        
-                        # For larger folders, calculate how many files to move
-                        files_to_move = remaining_files - self.file_threshold
-                        
-                        # Only recommend if this folder has enough files
-                        if files_to_move > 0 and files_to_move < folder_file_count:
+                        # Update remaining files
+                        remaining_files = self.file_threshold
+                        logger.info(f"Added partial split of folder: {largest_folder['folder_path']} (Level {largest_folder['level']}), files to move: {files_to_move:,}, new total: {remaining_files:,}")
+                        st.write(f"Added partial split of folder: {largest_folder['folder_path']} (Level {largest_folder['level']}), files to move: {files_to_move:,}, new total: {remaining_files:,}")
+                    else:
+                        # If we can't do a partial split, just add folders until we're below threshold
+                        for candidate in candidates:
+                            # Skip if we're already below threshold
+                            if remaining_files <= self.file_threshold:
+                                break
+                            
+                            # Add this candidate to recommendations
                             recommendations['recommended_splits'].append({
-                                'folder_path': folder_path,
-                                'folder_name': folder['Folder Name'],
-                                'folder_id': int(folder['Folder ID']) if not pd.isna(folder['Folder ID']) else None,
-                                'level': int(folder['Level']),
-                                'current_file_count': int(folder_file_count),
-                                'direct_file_count': int(folder['direct_file_count']),
-                                'recommended_files_to_move': int(files_to_move),
-                                'new_total_after_split': self.file_threshold,
-                                'is_partial_split': True
+                                'folder_path': candidate['folder_path'],
+                                'folder_name': candidate['folder_name'],
+                                'folder_id': candidate['folder_id'],
+                                'level': candidate['level'],
+                                'current_file_count': candidate['current_file_count'],
+                                'direct_file_count': candidate['direct_file_count'],
+                                'recommended_files_to_move': candidate['current_file_count'],
+                                'new_total_after_split': remaining_files - candidate['current_file_count']
                             })
                             
                             # Add this folder to the selected folders list
-                            selected_folder_paths.append(folder_path)
+                            selected_folder_paths.append(candidate['folder_path'])
                             
                             # Update remaining files
-                            remaining_files = self.file_threshold
-                            logger.info(f"Added partial split of folder: {folder_path} (Level {int(folder['Level'])}), files to move: {files_to_move:,}, new total: {remaining_files:,}")
-                            st.write(f"Added partial split of folder: {folder_path} (Level {int(folder['Level'])}), files to move: {files_to_move:,}, new total: {remaining_files:,}")
-                            break
+                            remaining_files -= candidate['current_file_count']
+                            logger.info(f"Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_files:,}")
+                            st.write(f"  Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_files:,}")
+                else:
+                    # Add the best fit candidates to recommendations
+                    for candidate in best_fit_candidates:
+                        # Add this candidate to recommendations
+                        recommendations['recommended_splits'].append({
+                            'folder_path': candidate['folder_path'],
+                            'folder_name': candidate['folder_name'],
+                            'folder_id': candidate['folder_id'],
+                            'level': candidate['level'],
+                            'current_file_count': candidate['current_file_count'],
+                            'direct_file_count': candidate['direct_file_count'],
+                            'recommended_files_to_move': candidate['current_file_count'],
+                            'new_total_after_split': remaining_files - candidate['current_file_count']
+                        })
+                        
+                        # Add this folder to the selected folders list
+                        selected_folder_paths.append(candidate['folder_path'])
+                        
+                        # Update remaining files
+                        remaining_files -= candidate['current_file_count']
+                        logger.info(f"Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_files:,}")
+                        st.write(f"  Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_files:,}")
+                
+                st.write(f"After processing all candidates, remaining files: {remaining_files:,}")
                 
                 # Calculate total recommended moves and remaining excess
                 total_recommended_moves = sum([rec.get('recommended_files_to_move', 0) for rec in recommendations['recommended_splits']])
@@ -871,46 +898,66 @@ class FolderSplitRecommender:
             csv_df.to_csv(csv_buffer, index=False)
             exports['csv'] = csv_buffer.getvalue()
             
-            # Export to Excel
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                # Summary sheet
-                summary_df = self.create_summary_table()
-                summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            # Export to Excel (with error handling for missing xlsxwriter)
+            try:
+                excel_buffer = io.BytesIO()
                 
-                # User sheets
-                for user_email, user_recs in self.recommendations.items():
-                    # Create user sheet
-                    user_df = pd.DataFrame(user_recs['recommended_splits'])
+                try:
+                    # Try to import xlsxwriter
+                    import xlsxwriter
+                    excel_engine = 'xlsxwriter'
+                except ImportError:
+                    # If xlsxwriter is not available, try openpyxl
+                    try:
+                        import openpyxl
+                        excel_engine = 'openpyxl'
+                    except ImportError:
+                        # If neither is available, raise an error
+                        raise ImportError("No Excel writer module found. Please install xlsxwriter or openpyxl: pip install xlsxwriter")
+                
+                with pd.ExcelWriter(excel_buffer, engine=excel_engine) as writer:
+                    # Summary sheet
+                    summary_df = self.create_summary_table()
+                    summary_df.to_excel(writer, sheet_name='Summary', index=False)
                     
-                    # Select and rename columns for Excel
-                    user_df = user_df[[
-                        'folder_path', 'folder_name', 'folder_id', 'level', 
-                        'current_file_count', 'recommended_files_to_move'
-                    ]]
-                    user_df.columns = [
-                        'Folder Path', 'Folder Name', 'Folder ID', 'Level',
-                        'Current File Count', 'Files to Move'
-                    ]
-                    
-                    # Add partial split column
-                    user_df['Partial Split'] = [
-                        'Yes' if split.get('is_partial_split', False) else 'No'
-                        for split in user_recs['recommended_splits']
-                    ]
-                    
-                    # Add assigned to column
-                    user_df['Assigned To'] = [
-                        split.get('assigned_to', '')
-                        for split in user_recs['recommended_splits']
-                    ]
-                    
-                    # Write to Excel
-                    sheet_name = user_email.split('@')[0][:31]  # Excel sheet names limited to 31 chars
-                    user_df.to_excel(writer, sheet_name=sheet_name, index=False)
-            
-            excel_data = excel_buffer.getvalue()
-            exports['excel'] = base64.b64encode(excel_data).decode('utf-8')
+                    # User sheets
+                    for user_email, user_recs in self.recommendations.items():
+                        # Create user sheet
+                        user_df = pd.DataFrame(user_recs['recommended_splits'])
+                        
+                        # Select and rename columns for Excel
+                        user_df = user_df[[
+                            'folder_path', 'folder_name', 'folder_id', 'level', 
+                            'current_file_count', 'recommended_files_to_move'
+                        ]]
+                        user_df.columns = [
+                            'Folder Path', 'Folder Name', 'Folder ID', 'Level',
+                            'Current File Count', 'Files to Move'
+                        ]
+                        
+                        # Add partial split column
+                        user_df['Partial Split'] = [
+                            'Yes' if split.get('is_partial_split', False) else 'No'
+                            for split in user_recs['recommended_splits']
+                        ]
+                        
+                        # Add assigned to column
+                        user_df['Assigned To'] = [
+                            split.get('assigned_to', '')
+                            for split in user_recs['recommended_splits']
+                        ]
+                        
+                        # Write to Excel
+                        sheet_name = user_email.split('@')[0][:31]  # Excel sheet names limited to 31 chars
+                        user_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                excel_data = excel_buffer.getvalue()
+                exports['excel'] = base64.b64encode(excel_data).decode('utf-8')
+            except Exception as e:
+                logger.warning(f"Error creating Excel export: {str(e)}")
+                st.warning(f"Excel export not available: {str(e)}")
+                # Set excel to None to indicate it's not available
+                exports['excel'] = None
             
             # Export to ZIP (containing all formats)
             zip_buffer = io.BytesIO()
@@ -921,8 +968,9 @@ class FolderSplitRecommender:
                 # Add CSV file
                 zip_file.writestr('recommendations.csv', exports['csv'])
                 
-                # Add Excel file
-                zip_file.writestr('recommendations.xlsx', base64.b64decode(exports['excel']))
+                # Add Excel file if available
+                if exports['excel'] is not None:
+                    zip_file.writestr('recommendations.xlsx', base64.b64decode(exports['excel']))
                 
                 # Add README file
                 readme_text = """# Folder Split Recommendations
@@ -933,8 +981,13 @@ This ZIP file contains recommendations for splitting folders to reduce user file
 
 - `recommendations.json`: JSON format of all recommendations
 - `recommendations.csv`: CSV format of all folder splits
-- `recommendations.xlsx`: Excel workbook with summary and per-user sheets
-
+"""
+                if exports['excel'] is not None:
+                    readme_text += "- `recommendations.xlsx`: Excel workbook with summary and per-user sheets\n"
+                else:
+                    readme_text += "- Excel export not available (requires xlsxwriter or openpyxl module)\n"
+                    
+                readme_text += """
 ## Implementation Notes
 
 1. Start with the highest priority folders (largest file counts)
@@ -952,7 +1005,14 @@ This ZIP file contains recommendations for splitting folders to reduce user file
             error_msg = f"Error exporting recommendations: {str(e)}"
             logger.error(error_msg)
             st.error(error_msg)
-            raise
+            # Return a minimal export with just the error message
+            return {
+                'json': json.dumps({'error': str(e)}),
+                'csv': f"Error,Message\nexport_error,{str(e)}",
+                'excel': None,
+                'zip': None,
+                'error': str(e)
+            }
 
 # Main Streamlit app
 def main():
@@ -1145,19 +1205,23 @@ def main():
                             )
                         
                         with col3:
-                            st.download_button(
-                                label="Download Excel",
-                                data=base64.b64decode(exports['excel']),
-                                file_name="recommendations.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
+                            if exports['excel'] is not None:
+                                st.download_button(
+                                    label="Download Excel",
+                                    data=base64.b64decode(exports['excel']),
+                                    file_name="recommendations.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                )
+                            else:
+                                st.warning("Excel export not available. Install xlsxwriter or openpyxl: pip install xlsxwriter")
                         
-                        st.download_button(
-                            label="Download All (ZIP)",
-                            data=base64.b64decode(exports['zip']),
-                            file_name="folder_split_recommendations.zip",
-                            mime="application/zip"
-                        )
+                        if exports['zip'] is not None:
+                            st.download_button(
+                                label="Download All (ZIP)",
+                                data=base64.b64decode(exports['zip']),
+                                file_name="folder_split_recommendations.zip",
+                                mime="application/zip"
+                            )
         
         except Exception as e:
             st.error(f"Error: {str(e)}")
