@@ -320,10 +320,10 @@ class FolderSplitRecommender:
         """
         Prioritize folders for splitting based on file count and assign to service accounts.
         
-        This method prioritizes folders with the highest file count that are below the threshold,
-        while respecting parent-child relationships. It continues adding folders until
-        the user's total file count is reduced to the threshold or less, then assigns
-        the selected folders to service accounts.
+        This method uses a hybrid approach:
+        1. First adds large folders until we get close to the threshold
+        2. Then switches to smaller folders to fine-tune and get as close as possible to the threshold
+        3. Stops when adding another folder would bring the user below the threshold
         
         Returns:
             Dictionary of recommendations for each user
@@ -401,38 +401,79 @@ class FolderSplitRecommender:
                         'new_total': new_total
                     })
                 
-                # Sort candidates by file count (descending) to prioritize larger folders
-                candidates.sort(key=lambda x: x['current_file_count'], reverse=True)
+                # HYBRID APPROACH:
+                # 1. First sort candidates by file count (descending) to prioritize larger folders
+                candidates_large_first = sorted(candidates, key=lambda x: x['current_file_count'], reverse=True)
                 
-                logger.info(f"Found {len(candidates)} candidates across all levels")
-                st.write(f"Found {len(candidates)} candidates across all levels")
+                # 2. Add large folders first until we get close to the threshold
+                # Define a buffer (how close we want to get to the threshold before switching to small folders)
+                buffer = 100000  # 100,000 files buffer
+                target_with_buffer = self.file_threshold + buffer
                 
-                # Add candidates to recommendations until we're below threshold or no more candidates
-                for candidate in candidates:
-                    # Skip if we're already below threshold
-                    if remaining_files <= self.file_threshold:
+                # Track folders added in phase 1 (large folders first)
+                phase1_folders = []
+                remaining_after_phase1 = remaining_files
+                
+                for candidate in candidates_large_first:
+                    # Stop if we're already close to or below the target with buffer
+                    if remaining_after_phase1 <= target_with_buffer:
                         break
                     
-                    # Add this candidate to recommendations
+                    # Add this candidate to phase 1 folders
+                    phase1_folders.append(candidate)
+                    
+                    # Update remaining files
+                    remaining_after_phase1 = candidate['new_total']
+                    logger.info(f"Phase 1 - Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_after_phase1:,}")
+                    st.write(f"  Phase 1 - Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_after_phase1:,}")
+                
+                # 3. Now switch to smaller folders first to fine-tune
+                # Get remaining candidates (those not added in phase 1)
+                remaining_candidates = [c for c in candidates if c not in phase1_folders]
+                
+                # Sort by file count (ascending) to prioritize smaller folders
+                remaining_candidates.sort(key=lambda x: x['current_file_count'])
+                
+                # Track folders added in phase 2 (small folders first)
+                phase2_folders = []
+                remaining_after_phase2 = remaining_after_phase1
+                
+                for candidate in remaining_candidates:
+                    # Stop if adding this folder would bring us below the threshold
+                    if candidate['new_total'] < self.file_threshold:
+                        logger.info(f"Phase 2 - Skipping folder: {candidate['folder_path']} (Level {candidate['level']}), would bring total below threshold: {candidate['new_total']:,}")
+                        st.write(f"  Phase 2 - Skipping folder: {candidate['folder_path']} (Level {candidate['level']}), would bring total below threshold: {candidate['new_total']:,}")
+                        continue
+                    
+                    # Add this candidate to phase 2 folders
+                    phase2_folders.append(candidate)
+                    
+                    # Update remaining files
+                    remaining_after_phase2 = candidate['new_total']
+                    logger.info(f"Phase 2 - Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_after_phase2:,}")
+                    st.write(f"  Phase 2 - Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_after_phase2:,}")
+                
+                # Combine folders from both phases
+                selected_folders = phase1_folders + phase2_folders
+                
+                # Add selected folders to recommendations
+                for folder in selected_folders:
                     recommendations['recommended_splits'].append({
-                        'folder_path': candidate['folder_path'],
-                        'folder_name': candidate['folder_name'],
-                        'folder_id': candidate['folder_id'],
-                        'level': candidate['level'],
-                        'current_file_count': candidate['current_file_count'],
-                        'direct_file_count': candidate['direct_file_count'],
-                        'recommended_files_to_move': candidate['current_file_count'],
-                        'new_total_after_split': candidate['new_total']
+                        'folder_path': folder['folder_path'],
+                        'folder_name': folder['folder_name'],
+                        'folder_id': folder['folder_id'],
+                        'level': folder['level'],
+                        'current_file_count': folder['current_file_count'],
+                        'direct_file_count': folder['direct_file_count'],
+                        'recommended_files_to_move': folder['current_file_count'],
+                        'new_total_after_split': folder['new_total']
                     })
                     
                     # Add this folder to the selected folders list
-                    selected_folder_paths.append(candidate['folder_path'])
-                    
-                    # Update remaining files
-                    remaining_files = candidate['new_total']
-                    logger.info(f"Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_files:,}")
-                    st.write(f"  Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_files:,}")
+                    selected_folder_paths.append(folder['folder_path'])
                 
+                # Final remaining files after both phases
+                remaining_files = remaining_after_phase2 if phase2_folders else remaining_after_phase1
                 st.write(f"After processing all candidates, remaining files: {remaining_files:,}")
                 
                 # Assign folders to service accounts
@@ -442,11 +483,11 @@ class FolderSplitRecommender:
                 # Calculate total files moved to service accounts
                 total_files_moved = sum(account['total_files'] for account in service_accounts)
                 
-                # FIXED: Calculate the correct final file count for the user
+                # Calculate the correct final file count for the user
                 # This should be the original total minus the files moved to service accounts
                 final_file_count = total_file_count - total_files_moved
                 
-                # FIXED: Set the correct values in the recommendations
+                # Set the correct values in the recommendations
                 recommendations['total_recommended_moves'] = int(total_files_moved)
                 recommendations['final_file_count'] = int(final_file_count)
                 recommendations['remaining_excess_files'] = int(final_file_count - self.file_threshold) if final_file_count > self.file_threshold else 0
@@ -750,10 +791,10 @@ class FolderSplitRecommender:
             
             # First add original users with their updated file counts
             for user_email, user_recs in self.recommendations.items():
-                # FIXED: Use the correct final file count after splitting
+                # Use the correct final file count after splitting
                 final_count = user_recs['final_file_count']
                 
-                # FIXED: Calculate files to move as the total files moved to service accounts
+                # Calculate files to move as the total files moved to service accounts
                 files_to_move = user_recs['total_recommended_moves']
                 
                 summary_data.append({
@@ -822,7 +863,7 @@ def main():
     """Main function to run the Streamlit application."""
     st.set_page_config(layout="wide")  # Set page to wide mode for better display
     
-    st.title("Folder Splitting Recommendation Tool (Final Version)")
+    st.title("Folder Splitting Recommendation Tool (Optimized Version)")
     
     st.write("""
     This tool analyzes folder ownership data and provides recommendations for splitting content 
@@ -832,8 +873,10 @@ def main():
     **Improvements in this version:**
     1. Skips large folders over 500,000 files instead of attempting partial splits
     2. Ensures no empty service accounts are created
-    3. Focuses on subfolders for better splitting options
-    4. Correctly calculates files to move as the total files moved to service accounts
+    3. Uses a hybrid approach for folder selection:
+       - First adds large folders until we get close to the threshold
+       - Then switches to smaller folders to fine-tune and get as close as possible to the threshold
+    4. Correctly calculates "After All Splits" and "Files to Move" counts
     5. Provides export functionality for detailed folder split recommendations
     """)
     
@@ -1316,4 +1359,3 @@ For questions or support, please contact your system administrator.
 # Run the app
 if __name__ == "__main__":
     main()
-
