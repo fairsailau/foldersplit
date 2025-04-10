@@ -294,10 +294,10 @@ class FolderSplitRecommender:
         """
         Prioritize folders for splitting based on file count and assign to service accounts.
         
-        This method uses a simple approach that:
-        1. Prioritizes level 1 folders first (since they already include all subfolders)
-        2. Sorts folders by file count (descending) to move larger folders first
-        3. Moves only enough folders to bring the user below the threshold
+        This method:
+        1. Prioritizes folders with the highest file count regardless of level
+        2. Properly handles parent-child folder relationships
+        3. Continues adding folders until the user's total file count is reduced to threshold or less
         4. Assigns folders to service accounts efficiently
         
         Returns:
@@ -320,7 +320,7 @@ class FolderSplitRecommender:
                 
                 logger.info(f"Processing recommendations for user: {user_email}")
                 st.write(f"Processing recommendations for user: {user_email}")
-                st.write(f"Total file count (from level 1 folders): {total_file_count:,}, Excess files: {excess_files:,}")
+                st.write(f"Original file count: {total_file_count:,}")
                 
                 # Initialize recommendations for this user
                 recommendations = {
@@ -330,21 +330,20 @@ class FolderSplitRecommender:
                     'recommended_splits': []
                 }
                 
-                # Track remaining files to be split
-                remaining_files = total_file_count
-                
                 # Get all folders owned by this user
                 user_folders = self.df[self.df['Owner'] == user_email].copy()
                 
-                # SIMPLIFIED APPROACH: First try level 1 folders
-                # Get level 1 folders and sort by file count (descending)
-                level1_folders = user_folders[user_folders['Level'] == 1].sort_values('File Count', ascending=False)
+                # Sort all folders by file count (descending) regardless of level
+                sorted_folders = user_folders.sort_values('File Count', ascending=False)
                 
                 # Track which folders have been selected for splitting
                 selected_folder_paths = []
                 
-                # Add level 1 folders until we're below threshold
-                for _, folder in level1_folders.iterrows():
+                # Track remaining files to be split
+                remaining_files = total_file_count
+                
+                # Add folders until we're below threshold
+                for _, folder in sorted_folders.iterrows():
                     # Skip if we're already below threshold
                     if remaining_files <= self.file_threshold:
                         break
@@ -354,6 +353,10 @@ class FolderSplitRecommender:
                     
                     # Skip folders that are too small to be worth splitting
                     if folder_file_count < 10000:
+                        continue
+                    
+                    # Skip if this folder is a subfolder of an already selected folder
+                    if self._is_subfolder_of_any(folder_path, selected_folder_paths):
                         continue
                     
                     # Calculate how much this split would reduce the total
@@ -377,23 +380,27 @@ class FolderSplitRecommender:
                     # Update remaining files
                     remaining_files = new_total
                     logger.info(f"Added folder: {folder_path} (Level {int(folder['Level'])}), file count: {folder_file_count:,}, new total: {remaining_files:,}")
-                    st.write(f"  Added folder: {folder_path} (Level {int(folder['Level'])}), file count: {folder_file_count:,}, new total: {remaining_files:,}")
+                    st.write(f"Added folder: {folder_path} (Level {int(folder['Level'])}), file count: {folder_file_count:,}, new total: {remaining_files:,}")
                 
-                # If we still haven't reached the threshold, try a partial split of the smallest level 1 folder
+                # If we still haven't reached the threshold, try a partial split of the smallest folder
                 # that would bring us below the threshold
                 if remaining_files > self.file_threshold:
-                    logger.info("Still above threshold after level 1 folders, looking for partial splits...")
-                    st.write("Still above threshold after level 1 folders, looking for partial splits...")
+                    logger.info("Still above threshold after all candidates, looking for partial splits...")
+                    st.write("Still above threshold after all candidates, looking for partial splits...")
                     
-                    # Get all level 1 folders that haven't been selected yet, sorted by file count (ascending)
-                    remaining_level1 = level1_folders[~level1_folders['Path'].isin(selected_folder_paths)].sort_values('File Count')
+                    # Get all folders that haven't been selected yet, sorted by file count (ascending)
+                    remaining_folders = sorted_folders[~sorted_folders['Path'].isin(selected_folder_paths)].sort_values('File Count')
                     
-                    for _, folder in remaining_level1.iterrows():
+                    for _, folder in remaining_folders.iterrows():
                         folder_path = folder['Path']
                         folder_file_count = folder['File Count']
                         
                         # Skip folders that are too small
                         if folder_file_count < 10000:
+                            continue
+                        
+                        # Skip if this folder is a subfolder of an already selected folder
+                        if self._is_subfolder_of_any(folder_path, selected_folder_paths):
                             continue
                         
                         # Calculate how many files to move
@@ -425,8 +432,8 @@ class FolderSplitRecommender:
                 # Calculate total recommended moves and remaining excess
                 total_recommended_moves = sum([rec.get('recommended_files_to_move', 0) for rec in recommendations['recommended_splits']])
                 
-                # Ensure total_recommended_moves doesn't exceed the original file count
-                total_recommended_moves = min(total_recommended_moves, total_file_count)
+                # Ensure total_recommended_moves doesn't exceed the original excess
+                total_recommended_moves = min(total_recommended_moves, excess_files)
                 
                 recommendations['total_recommended_moves'] = total_recommended_moves
                 recommendations['remaining_excess_files'] = int(remaining_files - self.file_threshold) if remaining_files > self.file_threshold else 0
