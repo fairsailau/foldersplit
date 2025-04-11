@@ -219,6 +219,24 @@ class FolderSplitRecommender:
                 return True
         return False
     
+    def _is_parent_of_any(self, folder_path: str, selected_folders: List[str]) -> bool:
+        """
+        Check if a folder is a parent of any folder in the selected_folders list.
+        
+        Args:
+            folder_path: Path of the folder to check
+            selected_folders: List of folder paths that have already been selected for splitting
+            
+        Returns:
+            True if the folder is a parent of any selected folder, False otherwise
+        """
+        for selected_folder in selected_folders:
+            # Check if selected_folder starts with folder_path
+            # We need to ensure it's a proper parent by checking for the trailing slash
+            if selected_folder.startswith(folder_path) and selected_folder != folder_path:
+                return True
+        return False
+    
     def assign_to_service_accounts(self, user_email: str, folders_to_split: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Assign folders to service accounts, keeping related folders together when possible
@@ -245,7 +263,13 @@ class FolderSplitRecommender:
             if not folders_to_split:
                 logger.info(f"No folders to split for user {user_email}")
                 return []
-                
+            
+            # Create a mapping of folder paths to their folder objects
+            folder_map = {folder['folder_path']: folder for folder in folders_to_split}
+            
+            # Create a mapping to track which service account each folder is assigned to
+            folder_to_account = {}
+            
             # Sort folders by path to keep related folders together
             folders_to_split.sort(key=lambda x: x['folder_path'])
             
@@ -274,10 +298,50 @@ class FolderSplitRecommender:
             
             # Process each group of related folders
             for group_key, group_folders in folder_groups.items():
-                # Sort folders within group by file count (descending)
-                group_folders.sort(key=lambda x: x['current_file_count'], reverse=True)
+                # Sort folders within group by path length (ascending) to process parents before children
+                group_folders.sort(key=lambda x: len(x['folder_path']))
                 
                 for folder in group_folders:
+                    folder_path = folder['folder_path']
+                    
+                    # Check if this folder is a parent or child of any already assigned folder
+                    assigned_to_account = None
+                    
+                    # Check if any parent folder has already been assigned
+                    for path in folder_to_account:
+                        if folder_path.startswith(path) and folder_path != path:
+                            # This folder is a child of an already assigned folder
+                            assigned_to_account = folder_to_account[path]
+                            logger.info(f"Folder {folder_path} is a child of {path}, assigning to same account: {assigned_to_account}")
+                            break
+                    
+                    # Check if any child folder has already been assigned
+                    if assigned_to_account is None:
+                        for path in folder_to_account:
+                            if path.startswith(folder_path) and path != folder_path:
+                                # This folder is a parent of an already assigned folder
+                                assigned_to_account = folder_to_account[path]
+                                logger.info(f"Folder {folder_path} is a parent of {path}, assigning to same account: {assigned_to_account}")
+                                break
+                    
+                    # If this folder needs to be assigned to a specific account due to parent/child relationship
+                    if assigned_to_account is not None:
+                        # Find the account
+                        target_account = None
+                        for account in service_accounts:
+                            if account['account_name'] == assigned_to_account:
+                                target_account = account
+                                break
+                        
+                        if target_account:
+                            # Add folder to the target account
+                            folder['assigned_to'] = target_account['account_name']
+                            target_account['folders'].append(folder)
+                            target_account['total_files'] += folder['recommended_files_to_move']
+                            folder_to_account[folder_path] = target_account['account_name']
+                            continue
+                    
+                    # If no parent/child relationship constraints, proceed with normal assignment
                     # Check if adding this folder would exceed the threshold for current account
                     if current_account['total_files'] + folder['recommended_files_to_move'] > self.file_threshold:
                         # Only add the current account to service_accounts if it has folders
@@ -295,6 +359,7 @@ class FolderSplitRecommender:
                     folder['assigned_to'] = current_account['account_name']
                     current_account['folders'].append(folder)
                     current_account['total_files'] += folder['recommended_files_to_move']
+                    folder_to_account[folder_path] = current_account['account_name']
             
             # Add the last account if it has folders
             if current_account['folders']:
@@ -380,6 +445,10 @@ class FolderSplitRecommender:
                     if self._is_subfolder_of_any(folder_path, selected_folder_paths):
                         continue
                     
+                    # Skip if this folder is a parent of any already selected folder
+                    if self._is_parent_of_any(folder_path, selected_folder_paths):
+                        continue
+                    
                     # Skip folders that exceed the threshold instead of doing partial splits
                     if folder_file_count > self.file_threshold:
                         logger.info(f"Skipping large folder: {folder_path} ({folder_file_count:,} files) - exceeds threshold")
@@ -426,10 +495,24 @@ class FolderSplitRecommender:
                     remaining_after_phase1 = candidate['new_total']
                     logger.info(f"Phase 1 - Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_after_phase1:,}")
                     st.write(f"  Phase 1 - Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_after_phase1:,}")
+                    
+                    # Add this folder to the selected folders list
+                    selected_folder_paths.append(candidate['folder_path'])
                 
                 # 3. Now switch to smaller folders first to fine-tune
                 # Get remaining candidates (those not added in phase 1)
-                remaining_candidates = [c for c in candidates if c not in phase1_folders]
+                remaining_candidates = []
+                for c in candidates:
+                    # Skip if this folder is a subfolder of any already selected folder
+                    if self._is_subfolder_of_any(c['folder_path'], selected_folder_paths):
+                        continue
+                    
+                    # Skip if this folder is a parent of any already selected folder
+                    if self._is_parent_of_any(c['folder_path'], selected_folder_paths):
+                        continue
+                    
+                    if c not in phase1_folders:
+                        remaining_candidates.append(c)
                 
                 # Sort by file count (ascending) to prioritize smaller folders
                 remaining_candidates.sort(key=lambda x: x['current_file_count'])
@@ -452,6 +535,9 @@ class FolderSplitRecommender:
                     remaining_after_phase2 = candidate['new_total']
                     logger.info(f"Phase 2 - Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_after_phase2:,}")
                     st.write(f"  Phase 2 - Added folder: {candidate['folder_path']} (Level {candidate['level']}), file count: {candidate['current_file_count']:,}, new total: {remaining_after_phase2:,}")
+                    
+                    # Add this folder to the selected folders list
+                    selected_folder_paths.append(candidate['folder_path'])
                 
                 # Combine folders from both phases
                 selected_folders = phase1_folders + phase2_folders
@@ -468,9 +554,6 @@ class FolderSplitRecommender:
                         'recommended_files_to_move': folder['current_file_count'],
                         'new_total_after_split': folder['new_total']
                     })
-                    
-                    # Add this folder to the selected folders list
-                    selected_folder_paths.append(folder['folder_path'])
                 
                 # Final remaining files after both phases
                 remaining_files = remaining_after_phase2 if phase2_folders else remaining_after_phase1
@@ -813,35 +896,39 @@ class FolderSplitRecommender:
                             'User': account['account_name'],
                             'Before Split': 0,  # Service accounts start with 0 files
                             'After All Splits': account['total_files'],
-                            'Files to Move': account['total_files'],  # All files are moved to this account
-                            'Service Accounts': '',  # Service accounts don't have their own service accounts
-                            'Status': 'Success' if account['total_files'] <= self.file_threshold else 'Partial Success'
+                            'Files to Move': account['total_files'],
+                            'Service Accounts': '',  # Service accounts don't have sub-accounts
+                            'Status': 'Success' if account['total_files'] <= self.file_threshold else 'Exceeds Threshold'
                         })
             
-            return pd.DataFrame(summary_data)
+            # Create DataFrame
+            summary_df = pd.DataFrame(summary_data)
+            
+            return summary_df
             
         except Exception as e:
             error_msg = f"Error creating summary table: {str(e)}"
             logger.error(error_msg)
+            st.error(error_msg)
             raise
-            
+    
     def get_folder_splits_table(self) -> pd.DataFrame:
         """
-        Create a detailed table of all recommended folder splits.
+        Create a detailed table of all folder splits.
         
         Returns:
-            DataFrame with detailed information about each folder split
+            DataFrame with detailed information about all folder splits
         """
         try:
-            folder_splits_data = []
+            splits_data = []
             
             # For each user with recommendations
             for user_email, user_recs in self.recommendations.items():
-                # For each folder split
+                # For each recommended split
                 for folder in user_recs['recommended_splits']:
-                    folder_splits_data.append({
+                    splits_data.append({
                         'User': user_email,
-                        'Service Account': folder.get('assigned_to', 'Unknown'),
+                        'Service Account': folder.get('assigned_to', ''),
                         'Folder Path': folder['folder_path'],
                         'Folder Name': folder['folder_name'],
                         'Folder ID': folder['folder_id'],
@@ -851,26 +938,26 @@ class FolderSplitRecommender:
                         'Split Type': 'Partial Split' if folder.get('is_partial_split', False) else 'Complete Split'
                     })
             
-            return pd.DataFrame(folder_splits_data)
+            # Create DataFrame
+            splits_df = pd.DataFrame(splits_data)
+            
+            return splits_df
             
         except Exception as e:
             error_msg = f"Error creating folder splits table: {str(e)}"
             logger.error(error_msg)
+            st.error(error_msg)
             raise
 
-# Main function to run the Streamlit application
 def main():
-    """Main function to run the Streamlit application."""
-    st.set_page_config(layout="wide")  # Set page to wide mode for better display
-    
+    """Main application entry point."""
     st.title("Folder Splitting Recommendation Tool (Optimized Version)")
     
-    st.write("""
-    This tool analyzes folder ownership data and provides recommendations for splitting content 
-    based on file count thresholds. It identifies users who own more than 500,000 files and 
-    recommends which folders to split to bring users below this threshold.
+    # Introduction
+    st.write("This tool analyzes folder ownership data and provides recommendations for splitting content based on file count thresholds. It identifies users who own more than 500,000 files and recommends which folders to split to bring users below this threshold.")
     
-    **Improvements in this version:**
+    st.write("Improvements in this version:")
+    st.markdown("""
     1. Skips large folders over 500,000 files instead of attempting partial splits
     2. Ensures no empty service accounts are created
     3. Uses a hybrid approach for folder selection:
@@ -880,13 +967,11 @@ def main():
     5. Provides export functionality for detailed folder split recommendations
     """)
     
-    # About this tool section
-    st.subheader("About This Tool")
-    st.write("""
-    This tool analyzes folder ownership data and provides recommendations for splitting content 
-    based on file count thresholds.
+    st.header("About This Tool")
+    st.write("This tool analyzes folder ownership data and provides recommendations for splitting content based on file count thresholds.")
     
-    **Key Features:**
+    st.write("Key Features:")
+    st.markdown("""
     1. Correctly calculates total file counts per user
     2. Identifies users exceeding the threshold
     3. Recommends which folders to split to service accounts
@@ -895,106 +980,114 @@ def main():
     6. Provides visualizations of the recommendations
     """)
     
-    # File upload section
-    st.subheader("Upload Data")
+    # Upload data
+    st.header("Upload Data")
     
-    # Create tabs for upload and sample data
-    upload_tabs = st.tabs(["Upload CSV", "Use Sample Data"])
+    # File uploader
+    uploaded_file = st.file_uploader("Upload CSV file with folder data", type=["csv"])
     
-    with upload_tabs[0]:
-        uploaded_file = st.file_uploader("Upload a CSV file with folder data", type="csv")
-        
-        if uploaded_file is not None:
-            try:
-                df = pd.read_csv(uploaded_file)
-                st.session_state.uploaded_data = df
-                st.write("Data uploaded successfully!")
-                st.dataframe(df.head())
-            except Exception as e:
-                st.error(f"Error reading CSV file: {str(e)}")
+    # Option to use sample data
+    use_sample_data = st.checkbox("Use sample data")
     
-    with upload_tabs[1]:
-        st.write("Use the sample data provided with the tool.")
-        if st.button("Load Sample Data"):
-            try:
-                # Load sample data from the current directory
-                df = pd.read_csv("folder_data.csv")
-                st.session_state.uploaded_data = df
-                st.write("Sample data loaded successfully!")
-                st.dataframe(df.head())
-            except Exception as e:
-                st.error(f"Error loading sample data: {str(e)}")
-    
-    # Threshold setting
-    st.subheader("Set Threshold")
-    threshold = st.number_input(
-        "Maximum number of files per user",
-        min_value=100000,
-        max_value=10000000,
-        value=500000,
-        step=100000,
-        help="Users with more files than this threshold will be identified for folder splitting."
-    )
+    # Threshold configuration
+    threshold = st.number_input("File count threshold", min_value=1000, value=500000, step=10000)
     st.session_state.threshold = threshold
     
-    # Analysis section
-    st.subheader("Analysis")
-    
-    # Check if data is uploaded
-    if 'uploaded_data' in st.session_state:
-        if st.button("Generate Recommendations"):
-            # Run the analysis
-            users_exceeding, recommendations, visualizations, summary_table = generate_recommendations()
+    # Process data when user clicks the button
+    if st.button("Generate Recommendations"):
+        if uploaded_file is not None or use_sample_data:
+            # Show progress
+            progress_bar = st.progress(0)
+            st.write("Processing data...")
             
-            # Display results if analysis is complete
-            if st.session_state.analysis_complete:
+            try:
+                # Load data
+                if uploaded_file is not None:
+                    df = pd.read_csv(uploaded_file)
+                    progress_bar.progress(0.1)
+                else:
+                    # Use sample data
+                    df = pd.read_csv("folder_data.csv")
+                    progress_bar.progress(0.1)
+                
+                # Store threshold in session state
+                st.session_state.threshold = threshold
+                
+                # Process data
+                users_exceeding, recommendations, visualizations, summary_table = process_data(df, threshold, progress_bar)
+                
+                # Store results in session state
+                st.session_state.users_exceeding = users_exceeding
+                st.session_state.recommendations = recommendations
+                st.session_state.visualizations = visualizations
+                st.session_state.summary_table = summary_table
+                
+                # Display results
                 display_results()
-    else:
-        st.info("Please upload data or load sample data to continue.")
+                
+            except Exception as e:
+                st.error(f"Error processing data: {str(e)}")
+                st.exception(e)
+        else:
+            st.error("Please upload a CSV file or use sample data.")
     
-    # Display results if analysis is already complete
-    if st.session_state.analysis_complete:
+    # Display results if analysis is complete
+    elif st.session_state.analysis_complete:
         display_results()
 
-def generate_recommendations():
-    """Generate recommendations based on the uploaded data and threshold."""
+def process_data(df: pd.DataFrame, threshold: int, progress_bar=None) -> Tuple[pd.DataFrame, Dict[str, Any], Dict[str, Dict[str, plt.Figure]], pd.DataFrame]:
+    """
+    Process the data and generate recommendations.
+    
+    Args:
+        df: DataFrame containing folder data
+        threshold: Maximum number of files a user should have
+        progress_bar: Optional Streamlit progress bar
+    
+    Returns:
+        Tuple containing:
+        - DataFrame of users exceeding the threshold
+        - Dictionary of recommendations for each user
+        - Dictionary of visualizations for each user
+        - Summary table DataFrame
+    """
     try:
-        st.subheader("Analysis Results")
+        # Create the recommender
+        recommender = FolderSplitRecommender(df, file_threshold=threshold)
+        if progress_bar:
+            progress_bar.progress(0.2)
         
-        # Create progress bar for overall process
-        progress_bar = st.progress(0)
-        
-        # Get the uploaded data and threshold from session state
-        df = st.session_state.uploaded_data
-        threshold = st.session_state.threshold
-        
-        # Create recommender
-        recommender = FolderSplitRecommender(df, threshold)
-        progress_bar.progress(0.1)
-        
-        # Calculate user statistics
+        # Calculate user stats
         users_exceeding = recommender.calculate_user_stats()
-        progress_bar.progress(0.2)
+        if progress_bar:
+            progress_bar.progress(0.3)
         
-        # Store users_exceeding in session state
-        st.session_state.users_exceeding = users_exceeding
+        # If no users exceed the threshold, return early
+        if len(users_exceeding) == 0:
+            st.success("No users exceed the threshold. No recommendations needed.")
+            if progress_bar:
+                progress_bar.progress(1.0)
+            return users_exceeding, {}, {}, pd.DataFrame()
         
         # Display users exceeding threshold
-        st.write(f"Found {len(users_exceeding)} users exceeding the threshold of {threshold:,} files:")
+        st.subheader("Users Exceeding Threshold")
         st.dataframe(users_exceeding)
         
-        # Generate recommendations
-        with st.spinner("Generating recommendations... This may take a few minutes for large datasets."):
-            recommendations = recommender.prioritize_folders()
-        progress_bar.progress(0.6)
+        # Prioritize folders
+        recommendations = recommender.prioritize_folders()
+        if progress_bar:
+            progress_bar.progress(0.6)
+        
+        # Create visualizations
+        visualizations = recommender.visualize_recommendations()
+        if progress_bar:
+            progress_bar.progress(0.8)
+        
+        # Store users exceeding in session state
+        st.session_state.users_exceeding = users_exceeding
         
         # Store recommendations in session state
         st.session_state.recommendations = recommendations
-        
-        # Create visualizations
-        with st.spinner("Creating visualizations..."):
-            visualizations = recommender.visualize_recommendations()
-        progress_bar.progress(0.8)
         
         # Store visualizations in session state
         st.session_state.visualizations = visualizations
@@ -1350,12 +1443,11 @@ For questions or support, please contact your system administrator.
 """
             zip_file.writestr('README.md', readme_content)
         
-        # Create download link for ZIP
+        # Create download link for ZIP file
         zip_buffer.seek(0)
-        b64 = base64.b64encode(zip_buffer.read()).decode()
-        href = f'<a href="data:application/zip;base64,{b64}" download="folder_split_recommendations.zip">Download All Results (ZIP)</a>'
-        st.markdown(href, unsafe_allow_html=True)
+        b64_zip = base64.b64encode(zip_buffer.read()).decode()
+        href_zip = f'<a href="data:application/zip;base64,{b64_zip}" download="folder_split_recommendations.zip">Download All Results as ZIP</a>'
+        st.markdown(href_zip, unsafe_allow_html=True)
 
-# Run the app
 if __name__ == "__main__":
     main()
