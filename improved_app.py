@@ -10,11 +10,13 @@ import numpy as np
 import unittest
 import logging
 from typing import Dict, List, Any, Tuple, Optional, Set
-import streamlit as st
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Set page to wide mode to use full screen width
+st.set_page_config(layout="wide", page_title="Folder Splitting Recommendation Tool")
 
 # Initialize session state for preserving data between reruns
 if 'recommendations' not in st.session_state:
@@ -1438,4 +1440,3 @@ For questions or support, please contact your system administrator.
 
 if __name__ == "__main__":
     main()
-
