@@ -986,28 +986,35 @@ def main():
     st.write("Processing data...")
     
     try:
-        # Load data
-        df = pd.read_csv("folder_data.csv")
-        progress_bar.progress(0.1)
+        # Use file uploader for deployment compatibility
+        uploaded_file = st.file_uploader("Upload folder data CSV", type=["csv"])
         
-        # Store threshold in session state
-        st.session_state.threshold = threshold
-        
-        # Process data
-        users_exceeding, recommendations, visualizations, summary_table = process_data(df, threshold, progress_bar)
-        
-        # Store results in session state
-        st.session_state.users_exceeding = users_exceeding
-        st.session_state.recommendations = recommendations
-        st.session_state.visualizations = visualizations
-        st.session_state.summary_table = summary_table
-        
-        # Mark analysis as complete
-        st.session_state.analysis_complete = True
-        
-        # Display results
-        display_results()
-        
+        # Check if file is uploaded
+        if uploaded_file is not None:
+            # Load data from uploaded file
+            df = pd.read_csv(uploaded_file)
+            progress_bar.progress(0.1)
+            
+            # Store threshold in session state
+            st.session_state.threshold = threshold
+            
+            # Process data
+            users_exceeding, recommendations, visualizations, summary_table = process_data(df, threshold, progress_bar)
+            
+            # Store results in session state
+            st.session_state.users_exceeding = users_exceeding
+            st.session_state.recommendations = recommendations
+            st.session_state.visualizations = visualizations
+            st.session_state.summary_table = summary_table
+            
+            # Mark analysis as complete
+            st.session_state.analysis_complete = True
+            
+            # Display results
+            display_results()
+        else:
+            st.info("Please upload a CSV file to begin analysis.")
+            
     except Exception as e:
         st.error(f"Error processing data: {str(e)}")
         st.exception(e)
@@ -1428,4 +1435,3 @@ For questions or support, please contact your system administrator.
 
 if __name__ == "__main__":
     main()
-
