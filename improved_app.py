@@ -903,7 +903,7 @@ class FolderSplitRecommender:
             error_msg = f"Error generating collaboration tables: {str(e)}"
             logger.error(error_msg)
             st.error(error_msg)
-            raise pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame()
     
     def visualize_recommendations(self) -> Dict[str, Dict[str, plt.Figure]]:
         """
