@@ -1158,7 +1158,7 @@ def display_results():
                         
                         st.plotly_chart(fig, use_container_width=True)
 
-def process_data(df: pd.DataFrame, threshold: int, progress_bar=None) -> Tuple[pd.DataFrame, Dict[str, Any], Dict[str, Dict[str, plt.Figure]], pd.DataFrame]:
+def process_data(df: pd.DataFrame, threshold: int, progress_bar=None) -> Tuple[pd.DataFrame, Dict[str, Any], Dict[str, Dict[str, Any]], pd.DataFrame, pd.DataFrame]:
     """
     Process the data and generate recommendations.
     
@@ -1173,6 +1173,7 @@ def process_data(df: pd.DataFrame, threshold: int, progress_bar=None) -> Tuple[p
         - Dictionary of recommendations for each user
         - Dictionary of visualizations for each user
         - Summary table as a DataFrame
+        - Folder splits table as a DataFrame
     """
     try:
         # Create recommender
