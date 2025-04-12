@@ -11,6 +11,9 @@ import unittest
 import logging
 from typing import Dict, List, Any, Tuple, Optional, Set
 
+# Import the collaboration module
+from collaboration_module import CollaborationAnalyzer, display_collaboration_results
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -36,6 +39,12 @@ if 'collaboration_data' not in st.session_state:
     st.session_state.collaboration_data = None
 if 'collaboration_analysis' not in st.session_state:
     st.session_state.collaboration_analysis = None
+if 'collaborators_to_add_df' not in st.session_state:
+    st.session_state.collaborators_to_add_df = None
+if 'collaborators_losing_access_df' not in st.session_state:
+    st.session_state.collaborators_losing_access_df = None
+if 'collaboration_visualizations' not in st.session_state:
+    st.session_state.collaboration_visualizations = None
 
 class FolderSplitRecommender:
     """
@@ -53,7 +62,7 @@ class FolderSplitRecommender:
         recommendations (dict): Dictionary containing recommendations for each user
     """
     
-    def __init__(self, df: pd.DataFrame, file_threshold: int = 500000, collaboration_df: pd.DataFrame = None):
+    def __init__(self, df: pd.DataFrame, file_threshold: int = 500000):
         """
         Initialize the recommender with the dataframe and threshold.
         
@@ -67,31 +76,16 @@ class FolderSplitRecommender:
                 - File Count: Number of active files within the folder and all subfolders
                 - Level: Folder level in the folder tree hierarchy (1 is root level)
             file_threshold: Maximum number of files a user should have (default: 500,000)
-            collaboration_df: Optional DataFrame containing collaboration data with columns:
-                - item_id: ID to match with Folder ID in the original upload
-                - item_type: Type of item
-                - collaborator_id: ID of the collaborator
-                - collaborator_name: Name of the collaborator
-                - collaborator_login: Login of the collaborator
-                - collaborator_type: Type of collaborator
-                - collaborator_permission: Permission level of the collaborator
-                - collaboration_id: ID of the collaboration
         """
         self.df = df
         self.file_threshold = file_threshold
-        self.collaboration_df = collaboration_df
         # Set service account threshold to 490,000 (hard requirement)
         self.service_account_threshold = 490000
         self.users_exceeding = None
         self.recommendations = {}
-        self.collaboration_analysis = {}
         
         # Validate input data
         self._validate_input_data()
-        
-        # Process collaboration data if provided
-        if self.collaboration_df is not None:
-            self._validate_collaboration_data()
         
     def _validate_input_data(self) -> None:
         """
@@ -121,40 +115,6 @@ class FolderSplitRecommender:
             self.df['Owner'] = self.df['Owner'].astype(str)
         except Exception as e:
             error_msg = f"Error converting data types: {str(e)}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-    
-    def _validate_collaboration_data(self) -> None:
-        """
-        Validate that the collaboration DataFrame has all required columns and proper data types.
-        
-        Raises:
-            ValueError: If required columns are missing or have incorrect data types
-        """
-        required_columns = [
-            'item_id', 'item_type', 'collaborator_id', 'collaborator_name', 
-            'collaborator_login', 'collaborator_type', 'collaborator_permission', 'collaboration_id'
-        ]
-        
-        # Check for missing columns
-        missing_columns = [col for col in required_columns if col not in self.collaboration_df.columns]
-        if missing_columns:
-            error_msg = f"Missing required columns in collaboration data: {', '.join(missing_columns)}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-        
-        # Check data types and convert if necessary
-        try:
-            # Ensure item_id is numeric for matching with Folder ID
-            self.collaboration_df['item_id'] = pd.to_numeric(self.collaboration_df['item_id'])
-            
-            # Ensure string columns are strings
-            string_columns = ['item_type', 'collaborator_name', 'collaborator_login', 
-                             'collaborator_type', 'collaborator_permission']
-            for col in string_columns:
-                self.collaboration_df[col] = self.collaboration_df[col].astype(str)
-        except Exception as e:
-            error_msg = f"Error converting collaboration data types: {str(e)}"
             logger.error(error_msg)
             raise ValueError(error_msg)
         
@@ -703,208 +663,6 @@ class FolderSplitRecommender:
             st.error(error_msg)
             raise
     
-    def analyze_collaborations(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Analyze collaboration data and determine which collaborators will be affected by folder splits.
-        
-        This method implements the collaboration logic:
-        - For root-level folder splits: collaborations remain unchanged
-        - For subfolder splits:
-          - Collaborators added directly to the subfolder will see it in their root folders
-          - Collaborators added at parent-folder level or above will lose access
-        
-        Returns:
-            Dictionary containing collaboration analysis results
-        """
-        logger.info("Analyzing collaboration data...")
-        st.write("Analyzing collaboration data...")
-        
-        try:
-            # Check if we have collaboration data
-            if self.collaboration_df is None:
-                logger.info("No collaboration data provided, skipping collaboration analysis")
-                return {}
-            
-            # Check if we have recommendations
-            if not self.recommendations:
-                logger.info("No recommendations available, skipping collaboration analysis")
-                return {}
-            
-            # Create a mapping of folder IDs to folder paths
-            folder_id_to_path = {}
-            folder_id_to_level = {}
-            for _, row in self.df.iterrows():
-                if not pd.isna(row['Folder ID']):
-                    folder_id = int(row['Folder ID'])
-                    folder_id_to_path[folder_id] = row['Path']
-                    folder_id_to_level[folder_id] = int(row['Level'])
-            
-            # Create a mapping of item_id to collaborators
-            item_to_collaborators = {}
-            for _, row in self.collaboration_df.iterrows():
-                item_id = int(row['item_id'])
-                if item_id not in item_to_collaborators:
-                    item_to_collaborators[item_id] = []
-                
-                item_to_collaborators[item_id].append({
-                    'collaborator_id': row['collaborator_id'],
-                    'collaborator_name': row['collaborator_name'],
-                    'collaborator_login': row['collaborator_login'],
-                    'collaborator_type': row['collaborator_type'],
-                    'collaborator_permission': row['collaborator_permission'],
-                    'collaboration_id': row['collaboration_id']
-                })
-            
-            # For each user with recommendations
-            for user_email, user_recs in self.recommendations.items():
-                # Initialize collaboration analysis for this user
-                self.collaboration_analysis[user_email] = {
-                    'user_email': user_email,
-                    'collaborators_to_add': [],
-                    'collaborators_losing_access': []
-                }
-                
-                # Process each recommended split
-                for folder in user_recs['recommended_splits']:
-                    folder_id = folder['folder_id']
-                    folder_level = folder['level']
-                    
-                    # Skip if folder ID is not available
-                    if folder_id is None:
-                        continue
-                    
-                    # Get collaborators for this folder
-                    folder_collaborators = item_to_collaborators.get(folder_id, [])
-                    
-                    # For root-level folder splits (level 1), collaborations remain unchanged
-                    if folder_level == 1:
-                        logger.info(f"Root-level folder split for {folder['folder_path']}, collaborations remain unchanged")
-                        continue
-                    
-                    # For subfolder splits (level > 1)
-                    # Find parent folder IDs
-                    parent_folder_ids = []
-                    folder_path = folder['folder_path']
-                    path_parts = folder_path.strip('/').split('/')
-                    
-                    # Build potential parent paths
-                    for i in range(1, len(path_parts)):
-                        parent_path = '/' + '/'.join(path_parts[:i]) + '/'
-                        # Find folder ID for this parent path
-                        for fid, path in folder_id_to_path.items():
-                            if path == parent_path:
-                                parent_folder_ids.append(fid)
-                    
-                    # Get collaborators for parent folders
-                    parent_collaborators = []
-                    for parent_id in parent_folder_ids:
-                        parent_collaborators.extend(item_to_collaborators.get(parent_id, []))
-                    
-                    # Collaborators added directly to the subfolder will see it in their root folders
-                    # Add them to the list of collaborators to add
-                    for collaborator in folder_collaborators:
-                        self.collaboration_analysis[user_email]['collaborators_to_add'].append({
-                            'folder_id': folder_id,
-                            'folder_name': folder['folder_name'],
-                            'folder_path': folder['folder_path'],
-                            'collaborator_id': collaborator['collaborator_id'],
-                            'collaborator_name': collaborator['collaborator_name'],
-                            'collaborator_login': collaborator['collaborator_login'],
-                            'collaborator_type': collaborator['collaborator_type'],
-                            'collaborator_permission': collaborator['collaborator_permission'],
-                            'collaboration_id': collaborator['collaboration_id'],
-                            'service_account': folder.get('assigned_to', 'Unknown')
-                        })
-                    
-                    # Collaborators added at parent-folder level or above will lose access
-                    # Add them to the list of collaborators losing access
-                    for collaborator in parent_collaborators:
-                        # Check if this collaborator is not already directly added to the subfolder
-                        if not any(c['collaborator_id'] == collaborator['collaborator_id'] for c in folder_collaborators):
-                            self.collaboration_analysis[user_email]['collaborators_losing_access'].append({
-                                'folder_id': folder_id,
-                                'folder_name': folder['folder_name'],
-                                'folder_path': folder['folder_path'],
-                                'collaborator_id': collaborator['collaborator_id'],
-                                'collaborator_name': collaborator['collaborator_name'],
-                                'collaborator_login': collaborator['collaborator_login'],
-                                'collaborator_type': collaborator['collaborator_type'],
-                                'collaborator_permission': collaborator['collaborator_permission'],
-                                'collaboration_id': collaborator['collaboration_id']
-                            })
-                
-                # Log summary
-                logger.info(f"Collaboration analysis for {user_email}:")
-                logger.info(f"Collaborators to add: {len(self.collaboration_analysis[user_email]['collaborators_to_add'])}")
-                logger.info(f"Collaborators losing access: {len(self.collaboration_analysis[user_email]['collaborators_losing_access'])}")
-            
-            return self.collaboration_analysis
-            
-        except Exception as e:
-            error_msg = f"Error analyzing collaborations: {str(e)}"
-            logger.error(error_msg)
-            st.error(error_msg)
-            raise
-    
-    def get_collaboration_tables(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Generate tables for collaborators to add and collaborators losing access.
-        
-        Returns:
-            Tuple containing:
-            - DataFrame of collaborators to add
-            - DataFrame of collaborators losing access
-        """
-        try:
-            # Check if we have collaboration analysis
-            if not self.collaboration_analysis:
-                return pd.DataFrame(), pd.DataFrame()
-            
-            # Prepare data for collaborators to add
-            collaborators_to_add_data = []
-            for user_email, analysis in self.collaboration_analysis.items():
-                for collaborator in analysis['collaborators_to_add']:
-                    collaborators_to_add_data.append({
-                        'User': user_email,
-                        'Folder ID': collaborator['folder_id'],
-                        'Folder Name': collaborator['folder_name'],
-                        'Folder Path': collaborator['folder_path'],
-                        'Collaborator ID': collaborator['collaborator_id'],
-                        'Collaborator Name': collaborator['collaborator_name'],
-                        'Collaborator Email': collaborator['collaborator_login'],
-                        'Collaborator Type': collaborator['collaborator_type'],
-                        'Permission': collaborator['collaborator_permission'],
-                        'Service Account': collaborator['service_account']
-                    })
-            
-            # Prepare data for collaborators losing access
-            collaborators_losing_access_data = []
-            for user_email, analysis in self.collaboration_analysis.items():
-                for collaborator in analysis['collaborators_losing_access']:
-                    collaborators_losing_access_data.append({
-                        'User': user_email,
-                        'Folder ID': collaborator['folder_id'],
-                        'Folder Name': collaborator['folder_name'],
-                        'Folder Path': collaborator['folder_path'],
-                        'Collaborator ID': collaborator['collaborator_id'],
-                        'Collaborator Name': collaborator['collaborator_name'],
-                        'Collaborator Email': collaborator['collaborator_login'],
-                        'Collaborator Type': collaborator['collaborator_type'],
-                        'Permission': collaborator['collaborator_permission']
-                    })
-            
-            # Create DataFrames
-            collaborators_to_add_df = pd.DataFrame(collaborators_to_add_data)
-            collaborators_losing_access_df = pd.DataFrame(collaborators_losing_access_data)
-            
-            return collaborators_to_add_df, collaborators_losing_access_df
-            
-        except Exception as e:
-            error_msg = f"Error generating collaboration tables: {str(e)}"
-            logger.error(error_msg)
-            st.error(error_msg)
-            return pd.DataFrame(), pd.DataFrame()
-    
     def visualize_recommendations(self) -> Dict[str, Dict[str, plt.Figure]]:
         """
         Create visualizations of the recommendations.
@@ -1141,32 +899,6 @@ class FolderSplitRecommender:
                 plt.tight_layout()
                 user_visualizations['level_distribution'] = fig
                 
-                # 8. NEW: Plot collaboration impact if collaboration data is available
-                if self.collaboration_analysis and user_email in self.collaboration_analysis:
-                    collab_analysis = self.collaboration_analysis[user_email]
-                    
-                    # Count collaborators to add and losing access
-                    collab_to_add = len(collab_analysis['collaborators_to_add'])
-                    collab_losing = len(collab_analysis['collaborators_losing_access'])
-                    
-                    if collab_to_add > 0 or collab_losing > 0:
-                        fig, ax = plt.subplots(figsize=(10, 6))
-                        
-                        labels = ['Collaborators to Add', 'Collaborators Losing Access']
-                        values = [collab_to_add, collab_losing]
-                        colors = ['#66b3ff', '#ff9999']
-                        
-                        ax.bar(labels, values, color=colors)
-                        
-                        # Add data labels
-                        for i, v in enumerate(values):
-                            ax.text(i, v + v*0.02, str(v), ha='center')
-                        
-                        ax.set_ylabel('Number of Collaborators')
-                        ax.set_title(f'Collaboration Impact for {user_email}')
-                        plt.tight_layout()
-                        user_visualizations['collaboration_impact'] = fig
-                
                 # Store visualizations for this user
                 visualizations[user_email] = user_visualizations
             
@@ -1287,7 +1019,7 @@ def main():
     """)
     
     # Create tabs for different sections
-    tabs = st.tabs(["Upload & Analysis", "Results", "About"])
+    tabs = st.tabs(["Upload & Analysis", "Results", "Collaboration Analysis", "About"])
     
     with tabs[0]:
         st.header("Upload Data")
@@ -1297,19 +1029,12 @@ def main():
         uploaded_file = st.file_uploader(
             "Upload a CSV file containing folder data",
             type=["csv"],
-            help="The CSV file should contain columns: Path, Folder Name, Folder ID, Owner, Size (MB), File Count, Level"
-        )
-        
-        # NEW: File uploader for collaboration data
-        st.subheader("2. Upload Collaboration Data (Optional)")
-        collaboration_file = st.file_uploader(
-            "Upload a CSV file containing collaboration data",
-            type=["csv"],
-            help="The CSV file should contain columns: item_id, item_type, collaborator_id, collaborator_name, collaborator_login, collaborator_type, collaborator_permission, collaboration_id"
+            help="The CSV file should contain columns: Path, Folder Name, Folder ID, Owner, Size (MB), File Count, Level",
+            key="folder_data_uploader"
         )
         
         # Threshold input
-        st.subheader("3. Set File Count Threshold")
+        st.subheader("2. Set File Count Threshold")
         threshold = st.number_input(
             "Maximum number of files a user should have",
             min_value=100000,
@@ -1323,7 +1048,7 @@ def main():
         st.session_state.threshold = threshold
         
         # Generate recommendations button
-        st.subheader("4. Generate Recommendations")
+        st.subheader("3. Generate Recommendations")
         generate_button = st.button("Generate Recommendations")
         
         # Process data when button is clicked
@@ -1337,15 +1062,8 @@ def main():
                 df = pd.read_csv(uploaded_file)
                 progress_bar.progress(0.1)
                 
-                # Read collaboration data if provided
-                collaboration_df = None
-                if collaboration_file is not None:
-                    st.write("Reading collaboration data...")
-                    collaboration_df = pd.read_csv(collaboration_file)
-                    progress_bar.progress(0.15)
-                
                 # Process data
-                users_exceeding, recommendations, visualizations, summary_table = process_data(df, threshold, collaboration_df, progress_bar)
+                users_exceeding, recommendations, visualizations, summary_table = process_data(df, threshold, progress_bar)
                 
                 # Store results in session state
                 st.session_state.users_exceeding = users_exceeding
@@ -1363,6 +1081,48 @@ def main():
                 st.exception(e)
         else:
             st.info("Please upload a CSV file to begin analysis.")
+        
+        # Add collaboration data upload section after folder split recommendations
+        if st.session_state.analysis_complete:
+            st.header("Collaboration Analysis")
+            st.subheader("4. Upload Collaboration Data (Optional)")
+            collaboration_file = st.file_uploader(
+                "Upload a CSV file containing collaboration data",
+                type=["csv"],
+                help="The CSV file should contain columns: item_id, item_type, collaborator_id, collaborator_name, collaborator_login, collaborator_type, collaborator_permission, collaboration_id",
+                key="collaboration_data_uploader"
+            )
+            
+            # Process collaboration data button
+            analyze_collab_button = st.button("Analyze Collaboration Impact")
+            
+            if analyze_collab_button and collaboration_file is not None and st.session_state.analysis_complete:
+                try:
+                    # Display progress bar
+                    collab_progress_bar = st.progress(0)
+                    st.write("Reading collaboration data...")
+                    
+                    # Read the collaboration CSV file
+                    collaboration_df = pd.read_csv(collaboration_file)
+                    collab_progress_bar.progress(0.3)
+                    
+                    # Store collaboration data in session state
+                    st.session_state.collaboration_data = collaboration_df
+                    
+                    # Process collaboration data
+                    process_collaboration_data(collaboration_df, df, st.session_state.recommendations, collab_progress_bar)
+                    
+                    # Complete the progress bar
+                    collab_progress_bar.progress(1.0)
+                    
+                    st.success("Collaboration analysis complete! View results in the Collaboration Analysis tab.")
+                except Exception as e:
+                    st.error(f"Error processing collaboration data: {str(e)}")
+                    st.exception(e)
+            elif analyze_collab_button and collaboration_file is None:
+                st.warning("Please upload a collaboration data CSV file.")
+            elif analyze_collab_button and not st.session_state.analysis_complete:
+                st.warning("Please generate folder split recommendations first.")
             
     with tabs[1]:
         st.header("Results")
@@ -1374,6 +1134,21 @@ def main():
             st.info("No analysis results to display. Please generate recommendations first.")
     
     with tabs[2]:
+        st.header("Collaboration Analysis")
+        
+        # Check if collaboration analysis is complete
+        if 'collaboration_analysis' in st.session_state and st.session_state.collaboration_analysis is not None:
+            # Display collaboration results
+            display_collaboration_results(
+                st.session_state.collaboration_analysis,
+                st.session_state.collaborators_to_add_df,
+                st.session_state.collaborators_losing_access_df,
+                st.session_state.collaboration_visualizations
+            )
+        else:
+            st.info("No collaboration analysis results to display. Please upload collaboration data and analyze collaboration impact.")
+    
+    with tabs[3]:
         st.header("About")
         st.markdown("""
         ### Folder Splitting Recommendation Tool
@@ -1392,10 +1167,11 @@ def main():
         
         #### How to use:
         1. Upload a CSV file containing folder data
-        2. (Optional) Upload a CSV file containing collaboration data
-        3. Set the file count threshold
-        4. Click "Generate Recommendations"
-        5. View the results and download the reports
+        2. Set the file count threshold
+        3. Click "Generate Recommendations"
+        4. View the results and download the reports
+        5. (Optional) Upload collaboration data and analyze collaboration impact
+        6. View collaboration analysis results
         
         #### Collaboration Logic:
         - For root-level folder splits: collaborations remain unchanged
@@ -1423,14 +1199,13 @@ def main():
         - collaboration_id: ID of the collaboration
         """)
 
-def process_data(df: pd.DataFrame, threshold: int, collaboration_df: pd.DataFrame = None, progress_bar=None) -> Tuple[pd.DataFrame, Dict[str, Any], Dict[str, Dict[str, plt.Figure]], pd.DataFrame]:
+def process_data(df: pd.DataFrame, threshold: int, progress_bar=None) -> Tuple[pd.DataFrame, Dict[str, Any], Dict[str, Dict[str, plt.Figure]], pd.DataFrame]:
     """
     Process the data and generate recommendations.
     
     Args:
         df: DataFrame containing folder data
         threshold: Maximum number of files a user should have
-        collaboration_df: Optional DataFrame containing collaboration data
         progress_bar: Optional Streamlit progress bar
     
     Returns:
@@ -1442,7 +1217,7 @@ def process_data(df: pd.DataFrame, threshold: int, collaboration_df: pd.DataFram
     """
     try:
         # Create the recommender
-        recommender = FolderSplitRecommender(df, file_threshold=threshold, collaboration_df=collaboration_df)
+        recommender = FolderSplitRecommender(df, file_threshold=threshold)
         if progress_bar:
             progress_bar.progress(0.2)
         
@@ -1472,13 +1247,6 @@ def process_data(df: pd.DataFrame, threshold: int, collaboration_df: pd.DataFram
         if progress_bar:
             progress_bar.progress(0.6)
         
-        # Analyze collaborations if collaboration data is provided
-        if collaboration_df is not None:
-            collaboration_analysis = recommender.analyze_collaborations()
-            st.session_state.collaboration_analysis = collaboration_analysis
-            if progress_bar:
-                progress_bar.progress(0.7)
-        
         # Create visualizations
         visualizations = recommender.visualize_recommendations()
         if progress_bar:
@@ -1504,12 +1272,6 @@ def process_data(df: pd.DataFrame, threshold: int, collaboration_df: pd.DataFram
         folder_splits_table = recommender.get_folder_splits_table()
         st.session_state.folder_splits_table = folder_splits_table
         
-        # Get collaboration tables if collaboration data is provided
-        if collaboration_df is not None:
-            collaborators_to_add_df, collaborators_losing_access_df = recommender.get_collaboration_tables()
-            st.session_state.collaborators_to_add_df = collaborators_to_add_df
-            st.session_state.collaborators_losing_access_df = collaborators_losing_access_df
-        
         # Mark analysis as complete
         st.session_state.analysis_complete = True
         
@@ -1524,6 +1286,50 @@ def process_data(df: pd.DataFrame, threshold: int, collaboration_df: pd.DataFram
         st.exception(e)  # This will show the full stack trace
         logger.error(f"Error during analysis: {str(e)}", exc_info=True)
         return None, None, None, None
+
+def process_collaboration_data(collaboration_df: pd.DataFrame, folder_df: pd.DataFrame, recommendations: Dict[str, Any], progress_bar=None) -> None:
+    """
+    Process collaboration data and analyze impact of folder splits on collaborators.
+    
+    Args:
+        collaboration_df: DataFrame containing collaboration data
+        folder_df: DataFrame containing folder data
+        recommendations: Dictionary containing folder split recommendations
+        progress_bar: Optional Streamlit progress bar
+    """
+    try:
+        st.write("Analyzing collaboration data...")
+        
+        # Create the collaboration analyzer
+        analyzer = CollaborationAnalyzer(collaboration_df, folder_df, recommendations)
+        if progress_bar:
+            progress_bar.progress(0.4)
+        
+        # Analyze collaborations
+        collaboration_analysis = analyzer.analyze_collaborations()
+        if progress_bar:
+            progress_bar.progress(0.6)
+        
+        # Get collaboration tables
+        collaborators_to_add_df, collaborators_losing_access_df = analyzer.get_collaboration_tables()
+        if progress_bar:
+            progress_bar.progress(0.8)
+        
+        # Create collaboration visualizations
+        collaboration_visualizations = analyzer.visualize_collaboration_impact()
+        if progress_bar:
+            progress_bar.progress(0.9)
+        
+        # Store results in session state
+        st.session_state.collaboration_analysis = collaboration_analysis
+        st.session_state.collaborators_to_add_df = collaborators_to_add_df
+        st.session_state.collaborators_losing_access_df = collaborators_losing_access_df
+        st.session_state.collaboration_visualizations = collaboration_visualizations
+        
+    except Exception as e:
+        st.error(f"Error during collaboration analysis: {str(e)}")
+        st.exception(e)  # This will show the full stack trace
+        logger.error(f"Error during collaboration analysis: {str(e)}", exc_info=True)
 
 def display_results():
     """Display the results of the analysis."""
@@ -1547,7 +1353,7 @@ def display_results():
     # Download CSV button for summary table
     csv = summary_table.to_csv(index=False)
     b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="summary.csv">Download Summary CSV</a>'
+    href = f'<a href="data:file/csv;base64,{b64}" download="summary.csv">Download CSV</a>'
     st.markdown(href, unsafe_allow_html=True)
     
     # Display unsplittable folders if any exist
@@ -1574,43 +1380,6 @@ def display_results():
     b64_splits = base64.b64encode(csv_splits.encode()).decode()
     href_splits = f'<a href="data:file/csv;base64,{b64_splits}" download="folder_splits.csv">Download Folder Splits CSV</a>'
     st.markdown(href_splits, unsafe_allow_html=True)
-    
-    # NEW: Display collaboration analysis if available
-    if hasattr(st.session_state, 'collaborators_to_add_df') and hasattr(st.session_state, 'collaborators_losing_access_df'):
-        collaborators_to_add_df = st.session_state.collaborators_to_add_df
-        collaborators_losing_access_df = st.session_state.collaborators_losing_access_df
-        
-        if not collaborators_to_add_df.empty or not collaborators_losing_access_df.empty:
-            st.subheader("Collaboration Analysis")
-            
-            # Create tabs for collaboration analysis
-            collab_tabs = st.tabs(["Collaborators to Add", "Collaborators Losing Access"])
-            
-            with collab_tabs[0]:
-                if not collaborators_to_add_df.empty:
-                    st.write("These collaborators need to be added to the new folders:")
-                    st.dataframe(collaborators_to_add_df)
-                    
-                    # Download CSV button for collaborators to add
-                    csv_to_add = collaborators_to_add_df.to_csv(index=False)
-                    b64_to_add = base64.b64encode(csv_to_add.encode()).decode()
-                    href_to_add = f'<a href="data:file/csv;base64,{b64_to_add}" download="collaborators_to_add.csv">Download Collaborators to Add CSV</a>'
-                    st.markdown(href_to_add, unsafe_allow_html=True)
-                else:
-                    st.info("No collaborators need to be added.")
-            
-            with collab_tabs[1]:
-                if not collaborators_losing_access_df.empty:
-                    st.write("These collaborators will lose access to the split folders:")
-                    st.dataframe(collaborators_losing_access_df)
-                    
-                    # Download CSV button for collaborators losing access
-                    csv_losing = collaborators_losing_access_df.to_csv(index=False)
-                    b64_losing = base64.b64encode(csv_losing.encode()).decode()
-                    href_losing = f'<a href="data:file/csv;base64,{b64_losing}" download="collaborators_losing_access.csv">Download Collaborators Losing Access CSV</a>'
-                    st.markdown(href_losing, unsafe_allow_html=True)
-                else:
-                    st.info("No collaborators will lose access.")
     
     # Overall visualizations
     st.subheader("Overall Visualizations")
@@ -1723,7 +1492,7 @@ def display_results():
                     'Service Account': account['account_name'],
                     'Total Files': account['total_files'],
                     'Number of Folders': len(account['folders']),
-                    'Percent of Threshold': f"{(account['total_files'] / st.session_state.threshold) * 100:.1f}%"
+                    'Percent of Threshold': f"{(account['total_files'] / threshold) * 100:.1f}%"
                 })
             
             account_df = pd.DataFrame(account_data)
@@ -1838,60 +1607,6 @@ def display_results():
                     with col2:
                         if 'level_distribution' in user_viz:
                             st.pyplot(user_viz['level_distribution'])
-                    
-                    # NEW: Display collaboration impact visualization if available
-                    if 'collaboration_impact' in user_viz:
-                        st.pyplot(user_viz['collaboration_impact'])
-            
-            # NEW: Display collaboration analysis for this user if available
-            if hasattr(st.session_state, 'collaboration_analysis'):
-                collaboration_analysis = st.session_state.collaboration_analysis
-                if user_email in collaboration_analysis:
-                    user_collab = collaboration_analysis[user_email]
-                    
-                    st.subheader("Collaboration Analysis")
-                    
-                    # Create tabs for collaboration analysis
-                    user_collab_tabs = st.tabs(["Collaborators to Add", "Collaborators Losing Access"])
-                    
-                    with user_collab_tabs[0]:
-                        if user_collab['collaborators_to_add']:
-                            # Create a DataFrame for collaborators to add
-                            collab_add_data = []
-                            for collab in user_collab['collaborators_to_add']:
-                                collab_add_data.append({
-                                    'Folder Name': collab['folder_name'],
-                                    'Folder Path': collab['folder_path'],
-                                    'Collaborator Name': collab['collaborator_name'],
-                                    'Collaborator Email': collab['collaborator_login'],
-                                    'Permission': collab['collaborator_permission'],
-                                    'Service Account': collab['service_account']
-                                })
-                            
-                            collab_add_df = pd.DataFrame(collab_add_data)
-                            st.write(f"Collaborators to add ({len(collab_add_df)} total):")
-                            st.dataframe(collab_add_df, use_container_width=True)
-                        else:
-                            st.info("No collaborators need to be added for this user.")
-                    
-                    with user_collab_tabs[1]:
-                        if user_collab['collaborators_losing_access']:
-                            # Create a DataFrame for collaborators losing access
-                            collab_lose_data = []
-                            for collab in user_collab['collaborators_losing_access']:
-                                collab_lose_data.append({
-                                    'Folder Name': collab['folder_name'],
-                                    'Folder Path': collab['folder_path'],
-                                    'Collaborator Name': collab['collaborator_name'],
-                                    'Collaborator Email': collab['collaborator_login'],
-                                    'Permission': collab['collaborator_permission']
-                                })
-                            
-                            collab_lose_df = pd.DataFrame(collab_lose_data)
-                            st.write(f"Collaborators losing access ({len(collab_lose_df)} total):")
-                            st.dataframe(collab_lose_df, use_container_width=True)
-                        else:
-                            st.info("No collaborators will lose access for this user.")
 
 if __name__ == "__main__":
     main()
