@@ -572,54 +572,89 @@ class FolderSplitRecommender:
                 final_file_count = recommendations['summary']['final_file_count']
                 service_accounts = recommendations['service_accounts']
                 
-                # Create before/after comparison chart
-                fig, ax = plt.subplots(figsize=(10, 6))
+                # Create before/after comparison chart using Plotly
+                before_after_data = pd.DataFrame({
+                    'Stage': ['Before Split', 'After Split'],
+                    'File Count': [original_file_count, final_file_count]
+                })
                 
-                # Bar chart data
-                labels = ['Before Split', 'After Split']
-                values = [original_file_count, final_file_count]
-                
-                # Create bars
-                ax.bar(labels, values, color=['#1f77b4', '#2ca02c'])
+                fig = px.bar(
+                    before_after_data,
+                    x='Stage',
+                    y='File Count',
+                    title=f'Before vs. After Split for {user_email}',
+                    color='Stage',
+                    text_auto=True
+                )
                 
                 # Add threshold line
-                ax.axhline(y=self.file_threshold, color='red', linestyle='--', label=f'Threshold ({self.file_threshold:,} files)')
+                fig.add_shape(
+                    type="line",
+                    x0=-0.5,
+                    x1=1.5,
+                    y0=self.file_threshold,
+                    y1=self.file_threshold,
+                    line=dict(color="red", width=2, dash="dash")
+                )
                 
-                # Add data labels
-                for i, v in enumerate(values):
-                    ax.text(i, v + v*0.02, f'{int(v):,}', ha='center')
-                
-                # Add labels and title
-                ax.set_ylabel('File Count')
-                ax.set_title(f'Before vs. After Split for {user_email}')
-                ax.legend()
+                # Add annotation for threshold
+                fig.add_annotation(
+                    x=1,
+                    y=self.file_threshold,
+                    text=f"Threshold: {self.file_threshold:,} files",
+                    showarrow=False,
+                    yshift=10,
+                    font=dict(color="red")
+                )
                 
                 # Save figure
                 user_visualizations['before_after_comparison'] = fig
                 
                 # Create service account distribution chart
                 if service_accounts:
-                    fig, ax = plt.subplots(figsize=(12, 8))
+                    # Create data for service account distribution
+                    service_account_data = pd.DataFrame({
+                        'Account': [account['account_name'] for account in service_accounts],
+                        'File Count': [account['total_files'] for account in service_accounts]
+                    })
                     
-                    # Bar chart data
-                    account_names = [account['account_name'] for account in service_accounts]
-                    account_file_counts = [account['total_files'] for account in service_accounts]
-                    
-                    # Create bars
-                    ax.bar(account_names, account_file_counts, color='#ff7f0e')
+                    # Create bar chart using Plotly
+                    fig = px.bar(
+                        service_account_data,
+                        x='Account',
+                        y='File Count',
+                        title=f'Service Account Distribution for {user_email}',
+                        color='File Count',
+                        text_auto=True,
+                        color_continuous_scale='Viridis'
+                    )
                     
                     # Add threshold line
-                    ax.axhline(y=self.file_threshold, color='red', linestyle='--', label=f'Threshold ({self.file_threshold:,} files)')
+                    fig.add_shape(
+                        type="line",
+                        x0=-0.5,
+                        x1=len(service_accounts)-0.5,
+                        y0=self.file_threshold,
+                        y1=self.file_threshold,
+                        line=dict(color="red", width=2, dash="dash")
+                    )
                     
-                    # Add data labels
-                    for i, v in enumerate(account_file_counts):
-                        ax.text(i, v + v*0.02, f'{int(v):,}', ha='center')
+                    # Add annotation for threshold
+                    fig.add_annotation(
+                        x=len(service_accounts)-1,
+                        y=self.file_threshold,
+                        text=f"Threshold: {self.file_threshold:,} files",
+                        showarrow=False,
+                        yshift=10,
+                        font=dict(color="red")
+                    )
                     
-                    # Add labels and title
-                    ax.set_ylabel('File Count')
-                    ax.set_title(f'Service Account Distribution for {user_email}')
-                    ax.set_xticklabels(account_names, rotation=45)
-                    ax.legend()
+                    # Update layout
+                    fig.update_layout(
+                        xaxis_title="Service Account",
+                        yaxis_title="File Count",
+                        xaxis={'categoryorder':'total descending'}
+                    )
                     
                     # Save figure
                     user_visualizations['service_account_distribution'] = fig
