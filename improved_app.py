@@ -457,7 +457,8 @@ class FolderSplitRecommender:
                     'user_email': user_email,
                     'total_file_count': int(total_file_count),
                     'excess_files': int(excess_files),
-                    'recommended_splits': []
+                    'recommended_splits': [],
+                    'unsplittable_folders': []  # New list to track folders that can't be split
                 }
                 
                 # Track remaining files to be split
@@ -486,10 +487,20 @@ class FolderSplitRecommender:
                     if self._is_parent_of_any(folder_path, selected_folder_paths):
                         continue
                     
-                    # Skip folders that exceed the threshold instead of doing partial splits
+                    # Track folders that exceed the threshold instead of doing partial splits
                     if folder_file_count > self.file_threshold:
-                        logger.info(f"Skipping large folder: {folder_path} ({folder_file_count:,} files) - exceeds threshold")
-                        st.write(f"Skipping large folder: {folder_path} ({folder_file_count:,} files) - exceeds threshold")
+                        logger.info(f"Unsplittable folder: {folder_path} ({folder_file_count:,} files) - exceeds threshold")
+                        st.write(f"Unsplittable folder: {folder_path} ({folder_file_count:,} files) - exceeds threshold")
+                        
+                        # Add to unsplittable folders list
+                        recommendations['unsplittable_folders'].append({
+                            'folder_path': folder_path,
+                            'folder_name': folder['Folder Name'],
+                            'folder_id': folder['Folder ID'],
+                            'level': folder['Level'],
+                            'file_count': int(folder_file_count),
+                            'reason': "Exceeds threshold and cannot be split (no suitable subfolders)"
+                        })
                         continue
                     
                     # Check if this folder is a good candidate (≤ threshold files)
@@ -949,21 +960,8 @@ def main():
     st.title("Folder Splitting Recommendation Tool (Optimized Version)")
     
     # Introduction
-    st.write("This tool analyzes folder ownership data and provides recommendations for splitting content based on file count thresholds. It identifies users who own more than 500,000 files and recommends which folders to split to bring users below this threshold.")
-    
-    st.write("Improvements in this version:")
-    st.markdown("""
-    1. Skips large folders over 500,000 files instead of attempting partial splits
-    2. Ensures no empty service accounts are created
-    3. Uses a hybrid approach for folder selection:
-       - First adds large folders until we get close to the threshold
-       - Then switches to smaller folders to fine-tune and get as close as possible to the threshold
-    4. Correctly calculates "After All Splits" and "Files to Move" counts
-    5. Provides export functionality for detailed folder split recommendations
-    """)
-    
     st.header("About This Tool")
-    st.write("This tool analyzes folder ownership data and provides recommendations for splitting content based on file count thresholds.")
+    st.write("This tool analyzes folder ownership data and provides recommendations for splitting content based on file count thresholds. It identifies users who own more than the specified file threshold and recommends which folders to split to bring users below this threshold.")
     
     st.write("Key Features:")
     st.markdown("""
@@ -978,11 +976,8 @@ def main():
     # Upload data
     st.header("Upload Data")
     
-    # Automatically use the provided data file
-    st.write("Automatically using the provided data file")
-    
-    # Set threshold
-    threshold = 500000
+    # Set threshold with user input
+    threshold = st.number_input("File count threshold", min_value=100000, max_value=10000000, value=500000, step=50000)
     st.write(f"Using file count threshold: {threshold:,}")
     st.session_state.threshold = threshold
     
@@ -1131,6 +1126,22 @@ def display_results():
     b64 = base64.b64encode(csv.encode()).decode()
     href = f'<a href="data:file/csv;base64,{b64}" download="summary.csv">Download CSV</a>'
     st.markdown(href, unsafe_allow_html=True)
+    
+    # Display unsplittable folders if any exist
+    for user_email, user_recs in recommendations.items():
+        if 'unsplittable_folders' in user_recs and user_recs['unsplittable_folders']:
+            st.subheader(f"Unsplittable Folders for {user_email}")
+            st.write("These folders exceed the threshold but cannot be split because they have no suitable subfolders:")
+            
+            # Create a DataFrame for unsplittable folders
+            unsplittable_df = pd.DataFrame(user_recs['unsplittable_folders'])
+            st.dataframe(unsplittable_df[['folder_path', 'file_count', 'reason']])
+            
+            # Download CSV button for unsplittable folders
+            csv_unsplittable = unsplittable_df.to_csv(index=False)
+            b64_unsplittable = base64.b64encode(csv_unsplittable.encode()).decode()
+            href_unsplittable = f'<a href="data:file/csv;base64,{b64_unsplittable}" download="unsplittable_folders_{user_email.replace("@", "_at_")}.csv">Download Unsplittable Folders CSV</a>'
+            st.markdown(href_unsplittable, unsafe_allow_html=True)
     
     # NEW: Download CSV button for folder splits table
     st.subheader("Detailed Folder Split Recommendations")
